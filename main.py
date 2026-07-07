@@ -36,3 +36,5 @@ if __name__ == "__main__":
     else:
         # Start the bot
         bot.run(token)
+
+pip install gspread oauth2client
