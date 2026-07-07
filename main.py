@@ -7,14 +7,21 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 # --- 1. SETUP GOOGLE AUTH ---
 # Pull credentials from Railway Variables
+# Replace your current Google Auth setup section with this:
 creds_str = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-if not creds_str:
-    print("CRITICAL WARNING: GOOGLE_SERVICE_ACCOUNT_JSON variable is missing!")
-else:
-    creds_dict = json.loads(creds_str)
-    scope = ["https://spreadsheets.google.com/feeds", 'https://www.googleapis.com/auth/spreadsheets', "https://www.googleapis.com/drive/api/v3", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-    client = gspread.authorize(creds)
+creds_dict = json.loads(creds_str)
+
+# Define the scopes clearly
+scope = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
+
+# Create credentials and specifically request the token
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+
+# Force the creation of an authorized client
+client = gspread.authorize(creds)
 
 # --- 2. LOAD YOUR CHANNEL MAP ---
 # Pull the dynamic routing map from Railway Variables
