@@ -1,4 +1,4 @@
 discord.py
 requests
-gspread
+gspread>=5.0.0
 oauth2client
