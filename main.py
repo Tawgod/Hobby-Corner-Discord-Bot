@@ -65,18 +65,32 @@ async def on_raw_reaction_add(payload):
         channel = bot.get_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
         
+        # 1. Try to get it from a Rich Embed first (Your Apps Script Posts)
         if message.embeds:
             embed = message.embeds[0]
             product_name = embed.title if embed.title else "Unknown Product"
             sku = embed.footer.text if embed.footer else "NO_SKU"
+            
+        # 2. Fallback: Try to get it from Plain Text
         else:
-            product_name = "Unknown Product"
+            text = message.content
+            product_name = text.split('\n')[0] # Assumes the first line of your text is the product name
+            
+            # Simple word-search for "SKU:" in the plain text
             sku = "NO_SKU"
+            words = text.split()
+            for i, word in enumerate(words):
+                # Look for SKU: or SKU
+                if "SKU" in word.upper():
+                    # Grab the very next word as the SKU
+                    if i + 1 < len(words):
+                        sku = words[i + 1]
+                    break
 
         # Generate the Timestamp
         timestamp = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
 
-        # Push to Raw Data: [Discord, SKU, Description, Qty, Status, Timestamp]
+        # Push to Raw Data
         current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
         current_sheet.append_row([user.name, sku, product_name, "1", "Pending", timestamp])
         
