@@ -5,7 +5,7 @@ import gspread
 import re
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime # Added for the Timestamp
+from datetime import datetime
 
 # --- 1. SETUP GOOGLE AUTH ---
 client = None 
@@ -40,15 +40,19 @@ intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- 4. THE REACTION LISTENER ---
+
+# ==========================================
+# 4. THE REACTION ADD LISTENER
+# ==========================================
 @bot.event
 async def on_raw_reaction_add(payload):
     channel_id_str = str(payload.channel_id)
 
+    # Filter: Only listen to mapped channels
     if channel_id_str not in CHANNEL_MAP:
         return
-    if payload.emoji.name != "📦":
-        return
+        
+    # NOTE: The Emoji filter was removed here! It now accepts ANY emoji.
 
     user = await bot.fetch_user(payload.user_id)
     if user.bot: 
@@ -74,17 +78,13 @@ async def on_raw_reaction_add(payload):
             embed = message.embeds[0]
             product_name = embed.title if embed.title else "Unknown Product"
             
-            # Smash every single part of the embed into one giant text string
             all_text = f"{embed.title} {embed.description} "
             if embed.footer: all_text += f"{embed.footer.text} "
             if embed.author: all_text += f"{embed.author.name} "
             for field in embed.fields:
                 all_text += f"{field.name} {field.value} "
                 
-            # Strip out Discord formatting like **bold** or _italics_ so it doesn't mess up the SKU
             clean_text = all_text.replace('*', '').replace('_', '').replace('`', '')
-            
-            # Hunt down "SKU" (followed by optional colons or spaces) and grab the code right after it
             match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
             if match:
                 sku = match.group(1)
@@ -93,17 +93,14 @@ async def on_raw_reaction_add(payload):
         else:
             text = message.content
             if text:
-                product_name = text.split('\n')[0] # Assumes first line is product name
+                product_name = text.split('\n')[0] 
                 clean_text = text.replace('*', '').replace('_', '').replace('`', '')
-                
                 match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
                 if match:
                     sku = match.group(1)
 
-        # Generate the Timestamp
+        # Generate Timestamp and Push
         timestamp = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
-
-        # Push to Raw Data
         current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
         current_sheet.append_row([user.name, sku, product_name, "1", "Pending", timestamp])
         
@@ -112,16 +109,19 @@ async def on_raw_reaction_add(payload):
     except Exception as e:
         print(f"Error writing to Sheet: {e}")
 
-# --- 4.5. THE REACTION REMOVAL LISTENER (THE UNDO BUTTON) ---
+
+# ==========================================
+# 5. THE REACTION REMOVAL LISTENER (UNDO)
+# ==========================================
 @bot.event
 async def on_raw_reaction_remove(payload):
     channel_id_str = str(payload.channel_id)
 
-    # 1. Filters
+    # Filter: Only listen to mapped channels
     if channel_id_str not in CHANNEL_MAP:
         return
-    if payload.emoji.name != "📦":
-        return
+        
+    # NOTE: The Emoji filter was removed here too!
 
     user = await bot.fetch_user(payload.user_id)
     if user.bot: 
@@ -136,33 +136,48 @@ async def on_raw_reaction_remove(payload):
         return
 
     try:
-        # 2. Fetch the SKU of the item they un-reacted to
         channel = bot.get_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
         
-        if message.embeds:
-            sku = message.embeds[0].footer.text if message.embeds[0].footer else "NO_SKU"
-        else:
-            sku = "NO_SKU"
+        sku = "NO_SKU"
 
-        # 3. Connect to the Sheet and pull all current records
+        # Omni-Scanner to find the SKU of the item being removed
+        if message.embeds:
+            embed = message.embeds[0]
+            all_text = f"{embed.title} {embed.description} "
+            if embed.footer: all_text += f"{embed.footer.text} "
+            if embed.author: all_text += f"{embed.author.name} "
+            for field in embed.fields:
+                all_text += f"{field.name} {field.value} "
+            clean_text = all_text.replace('*', '').replace('_', '').replace('`', '')
+            match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
+            if match:
+                sku = match.group(1)
+        else:
+            text = message.content
+            if text:
+                clean_text = text.replace('*', '').replace('_', '').replace('`', '')
+                match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
+                if match:
+                    sku = match.group(1)
+
+        # Pull records and search backward for the most recent Pending order
         current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
         all_rows = current_sheet.get_all_values()
 
-        # 4. Search backwards to find their most recent Pending order
         row_to_delete = None
         
-        # Loop from the bottom of the sheet up to row 2 (skipping the header)
+        # Loop from bottom up
         for i in range(len(all_rows) - 1, 0, -1): 
             row = all_rows[i]
             
-            # Check if row has enough columns: Discord(0), SKU(1), Status(4)
+            # Check if row matches: Discord(0), SKU(1), Status(4)
             if len(row) >= 5:
                 if row[0] == user.name and row[1] == sku and row[4] == "Pending":
-                    row_to_delete = i + 1 # Google Sheets rows are 1-indexed
-                    break # Stop searching once we find the most recent match
+                    row_to_delete = i + 1 
+                    break 
         
-        # 5. Execute the Deletion
+        # Execute Deletion
         if row_to_delete:
             current_sheet.delete_rows(row_to_delete)
             print(f"Removed: Deleted {user.name}'s pending order for [{sku}].")
@@ -172,15 +187,18 @@ async def on_raw_reaction_remove(payload):
     except Exception as e:
         print(f"Error removing from Sheet: {e}")
 
-# --- 5. SYSTEM COMMANDS ---
+
+# ==========================================
+# 6. SYSTEM COMMANDS
+# ==========================================
 @bot.event
 async def on_ready():
     print(f'Successfully logged in as {bot.user}')
-    print('System Online: Ready to route SKUs and Timestamps to Google Sheets.')
+    print('System Online: Ready to route SKUs and Timestamps (Any Emoji) to Google Sheets.')
 
 @bot.command(name="ping")
 async def ping(ctx):
-    await ctx.send("Pong! The bot is online and tracking SKUs.")
+    await ctx.send("Pong! The bot is online, tracking SKUs, and listening to all emojis.")
 
 if __name__ == "__main__":
     token = os.environ.get("DISCORD_TOKEN")
