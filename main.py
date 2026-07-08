@@ -85,6 +85,66 @@ async def on_raw_reaction_add(payload):
     except Exception as e:
         print(f"Error writing to Sheet: {e}")
 
+# --- 4.5. THE REACTION REMOVAL LISTENER (THE UNDO BUTTON) ---
+@bot.event
+async def on_raw_reaction_remove(payload):
+    channel_id_str = str(payload.channel_id)
+
+    # 1. Filters
+    if channel_id_str not in CHANNEL_MAP:
+        return
+    if payload.emoji.name != "📦":
+        return
+
+    user = await bot.fetch_user(payload.user_id)
+    if user.bot: 
+        return
+    
+    destination = CHANNEL_MAP[channel_id_str]
+    target_sheet_id = destination["sheet_id"]
+    target_tab_name = destination["tab_name"]
+
+    if client is None:
+        print("Error: Bot is not authenticated with Google Sheets.")
+        return
+
+    try:
+        # 2. Fetch the SKU of the item they un-reacted to
+        channel = bot.get_channel(payload.channel_id)
+        message = await channel.fetch_message(payload.message_id)
+        
+        if message.embeds:
+            sku = message.embeds[0].footer.text if message.embeds[0].footer else "NO_SKU"
+        else:
+            sku = "NO_SKU"
+
+        # 3. Connect to the Sheet and pull all current records
+        current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
+        all_rows = current_sheet.get_all_values()
+
+        # 4. Search backwards to find their most recent Pending order
+        row_to_delete = None
+        
+        # Loop from the bottom of the sheet up to row 2 (skipping the header)
+        for i in range(len(all_rows) - 1, 0, -1): 
+            row = all_rows[i]
+            
+            # Check if row has enough columns: Discord(0), SKU(1), Status(4)
+            if len(row) >= 5:
+                if row[0] == user.name and row[1] == sku and row[4] == "Pending":
+                    row_to_delete = i + 1 # Google Sheets rows are 1-indexed
+                    break # Stop searching once we find the most recent match
+        
+        # 5. Execute the Deletion
+        if row_to_delete:
+            current_sheet.delete_rows(row_to_delete)
+            print(f"Removed: Deleted {user.name}'s pending order for [{sku}].")
+        else:
+            print(f"Ignored: {user.name} removed a reaction, but no 'Pending' order was found for [{sku}].")
+            
+    except Exception as e:
+        print(f"Error removing from Sheet: {e}")
+
 # --- 5. SYSTEM COMMANDS ---
 @bot.event
 async def on_ready():
