@@ -171,11 +171,11 @@ async def on_raw_reaction_remove(payload):
         for i in range(len(all_rows) - 1, 0, -1): 
             row = all_rows[i]
             
-            # Check if row matches: Discord(0), SKU(1), Status(4)
+            # Check if row matches: Discord(0) and SKU(1) (Ignores Status)
             if len(row) >= 5:
-                if row[0] == user.name and row[1] == sku and row[4] == "Pending":
+                if row[0] == user.name and row[1] == sku:
                     row_to_delete = i + 1 
-                    break 
+                    break
         
         # Execute Deletion
         if row_to_delete:
