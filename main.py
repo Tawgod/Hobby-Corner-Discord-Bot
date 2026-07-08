@@ -2,6 +2,7 @@ import os
 import json
 import discord
 import gspread
+import re
 from discord.ext import commands
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime # Added for the Timestamp
@@ -65,27 +66,39 @@ async def on_raw_reaction_add(payload):
         channel = bot.get_channel(payload.channel_id)
         message = await channel.fetch_message(payload.message_id)
         
-        # 1. Try to get it from a Rich Embed first (Your Apps Script Posts)
+        sku = "NO_SKU"
+        product_name = "Unknown Product"
+
+        # --- THE OMNI-SCANNER ---
         if message.embeds:
             embed = message.embeds[0]
             product_name = embed.title if embed.title else "Unknown Product"
-            sku = embed.footer.text if embed.footer else "NO_SKU"
             
-        # 2. Fallback: Try to get it from Plain Text
+            # Smash every single part of the embed into one giant text string
+            all_text = f"{embed.title} {embed.description} "
+            if embed.footer: all_text += f"{embed.footer.text} "
+            if embed.author: all_text += f"{embed.author.name} "
+            for field in embed.fields:
+                all_text += f"{field.name} {field.value} "
+                
+            # Strip out Discord formatting like **bold** or _italics_ so it doesn't mess up the SKU
+            clean_text = all_text.replace('*', '').replace('_', '').replace('`', '')
+            
+            # Hunt down "SKU" (followed by optional colons or spaces) and grab the code right after it
+            match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
+            if match:
+                sku = match.group(1)
+
+        # --- PLAIN TEXT FALLBACK ---
         else:
             text = message.content
-            product_name = text.split('\n')[0] # Assumes the first line of your text is the product name
-            
-            # Simple word-search for "SKU:" in the plain text
-            sku = "NO_SKU"
-            words = text.split()
-            for i, word in enumerate(words):
-                # Look for SKU: or SKU
-                if "SKU" in word.upper():
-                    # Grab the very next word as the SKU
-                    if i + 1 < len(words):
-                        sku = words[i + 1]
-                    break
+            if text:
+                product_name = text.split('\n')[0] # Assumes first line is product name
+                clean_text = text.replace('*', '').replace('_', '').replace('`', '')
+                
+                match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
+                if match:
+                    sku = match.group(1)
 
         # Generate the Timestamp
         timestamp = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
