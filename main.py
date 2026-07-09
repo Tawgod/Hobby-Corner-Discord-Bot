@@ -99,12 +99,16 @@ async def on_raw_reaction_add(payload):
                 if match:
                     sku = match.group(1)
 
-        # Generate Timestamp and Push
+        # Generate the Timestamp
         timestamp = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+
+        # Push to Raw Data: [DiscordName, SKU, ProductName, Qty, Status, Timestamp, DiscordID]
         current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
-        current_sheet.append_row([user.name, sku, product_name, "1", "Pending", timestamp])
         
-        print(f"Success! Logged {user.name}'s order for [{sku}] {product_name}.")
+        # ---> THIS IS THE NEW LINE WITH str(user.id) AT THE END <---
+        current_sheet.append_row([user.name, sku, product_name, "1", "Pending", timestamp, str(user.id)])
+        
+        print(f"Success! Logged {user.name}'s order for [{sku}]. ID: {user.id}")
         
     except Exception as e:
         print(f"Error writing to Sheet: {e}")
