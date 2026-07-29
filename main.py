@@ -26,6 +26,10 @@ else:
     except Exception as e:
         print(f"Failed to authenticate with Google: {e}")
 
+# --- LOCAL MEMORY CACHE ---
+# This prevents Discord rate limits by remembering SKUs we've already looked up
+MESSAGE_CACHE = {}
+
 # --- 2. LOAD YOUR CHANNEL MAP ---
 map_str = os.environ.get("CHANNEL_SHEET_MAP")
 if not map_str:
@@ -46,73 +50,77 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # ==========================================
 @bot.event
 async def on_raw_reaction_add(payload):
-    channel_id_str = str(payload.channel_id)
+    # Safety Check: Make sure Google Sheets authenticated correctly
+    if client is None:
+        print("ERROR: Cannot write to Sheets. Google Auth failed on startup.")
+        return
 
-    # Filter: Only listen to mapped channels
+    channel_id_str = str(payload.channel_id)
+    message_id_str = str(payload.message_id)
+
+    # 1. Filter: Check if this channel is in our Railway map
     if channel_id_str not in CHANNEL_MAP:
         return
-        
-    # NOTE: The Emoji filter was removed here! It now accepts ANY emoji.
 
+    # 2. Identify the user
     user = await bot.fetch_user(payload.user_id)
     if user.bot: 
         return
-    
+        
+    # Generate the exact timestamp of the click
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 3. Extract destination info from your Railway map
     destination = CHANNEL_MAP[channel_id_str]
     target_sheet_id = destination["sheet_id"]
     target_tab_name = destination["tab_name"]
 
-    if client is None:
-        print("Error: Bot is not authenticated with Google Sheets.")
-        return
-
     try:
-        channel = bot.get_channel(payload.channel_id)
-        message = await channel.fetch_message(payload.message_id)
-        
-        sku = "NO_SKU"
-        product_name = "Unknown Product"
-
-        # --- THE OMNI-SCANNER ---
-        if message.embeds:
-            embed = message.embeds[0]
-            product_name = embed.title if embed.title else "Unknown Product"
-            
-            all_text = f"{embed.title} {embed.description} "
-            if embed.footer: all_text += f"{embed.footer.text} "
-            if embed.author: all_text += f"{embed.author.name} "
-            for field in embed.fields:
-                all_text += f"{field.name} {field.value} "
-                
-            clean_text = all_text.replace('*', '').replace('_', '').replace('`', '')
-            match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
-            if match:
-                sku = match.group(1)
-
-        # --- PLAIN TEXT FALLBACK ---
+        # --- THE CACHE SYSTEM ---
+        if message_id_str in MESSAGE_CACHE:
+            # Pull from memory instantly (Zero Discord API calls!)
+            product_name = MESSAGE_CACHE[message_id_str]["product"]
+            sku = MESSAGE_CACHE[message_id_str]["sku"]
         else:
-            text = message.content
-            if text:
-                product_name = text.split('\n')[0] 
-                clean_text = text.replace('*', '').replace('_', '').replace('`', '')
-                match = re.search(r"SKU\s*:?\s*([^\s]+)", clean_text, re.IGNORECASE)
-                if match:
-                    sku = match.group(1)
+            # Fetch from Discord only this one time
+            channel = bot.get_channel(payload.channel_id)
+            message = await channel.fetch_message(payload.message_id)
+            
+            product_name = message.embeds[0].title if message.embeds else "Unknown Product"
+            
+            # --- THE OMNI-SCANNER ---
+            full_text = ""
+            if message.embeds:
+                for embed in message.embeds:
+                    full_text += str(embed.title) + " "
+                    full_text += str(embed.description) + " "
+                    if embed.footer:
+                        full_text += str(embed.footer.text) + " "
+                    for field in embed.fields:
+                        full_text += str(field.name) + " " + str(field.value) + " "
+            else:
+                full_text = message.content
+                
+            full_text = full_text.replace("*", "").replace("_", "")
+            sku_match = re.search(r'SKU:\s*([A-Za-z0-9_-]+)', full_text, re.IGNORECASE)
+            sku = sku_match.group(1) if sku_match else "NO_SKU"
 
-        # Generate the Timestamp
-        timestamp = datetime.now().strftime("%m/%d/%Y %I:%M:%S %p")
+            # Save it to memory so we never ask Discord again
+            MESSAGE_CACHE[message_id_str] = {
+                "product": product_name,
+                "sku": sku
+            }
 
-        # Push to Raw Data: [DiscordName, SKU, ProductName, Qty, Status, Timestamp, DiscordID]
+        # 4. Open the correct specific sheet & tab, and push the data
         current_sheet = client.open_by_key(target_sheet_id).worksheet(target_tab_name)
         
-        # ---> THIS IS THE NEW LINE WITH str(user.id) AT THE END <---
+        # Format: [Discord Name, SKU, Item Description, Qty, Status, Timestamp, Discord ID]
         current_sheet.append_row([user.name, sku, product_name, "1", "Pending", timestamp, str(user.id)])
         
-        print(f"Success! Logged {user.name}'s order for [{sku}]. ID: {user.id}")
+        print(f"Success! Logged {user.name}'s order for {sku} into {target_tab_name}.")
         
     except Exception as e:
         print(f"Error writing to Sheet: {e}")
-
 
 # ==========================================
 # 5. THE REACTION REMOVAL LISTENER (UNDO)
