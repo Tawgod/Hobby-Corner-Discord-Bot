@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 # 1. GOOGLE SHEETS AUTHENTICATION
 # ==========================================
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds_json = os.environ.get("GOOGLE_CREDENTIALS")
+creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 if creds_json:
     creds_dict = json.loads(creds_json)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -31,7 +31,7 @@ intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Load CHANNEL_MAP from environment variables
-channel_map_env = os.environ.get("CHANNEL_MAP")
+channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
     CHANNEL_MAP = json.loads(channel_map_env)
 else:
@@ -404,7 +404,7 @@ async def on_message(message):
 # ==========================================
 # 6. RUN THE BOT
 # ==========================================
-bot_token = os.environ.get("DISCORD_BOT_TOKEN")
+bot_token = os.environ.get("DISCORD_TOKEN")
 if bot_token:
     bot.run(bot_token)
 else:
