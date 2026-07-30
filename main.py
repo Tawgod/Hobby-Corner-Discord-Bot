@@ -30,7 +30,7 @@ intents.reactions = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-channel_map_env = os.environ.get("CHANNEL_MAP")
+channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
     CHANNEL_MAP = json.loads(channel_map_env)
 else:
