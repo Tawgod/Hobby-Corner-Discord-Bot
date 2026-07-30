@@ -6,7 +6,7 @@ import re
 import asyncio
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # ==========================================
 # 1. GOOGLE SHEETS AUTHENTICATION
@@ -161,7 +161,7 @@ async def on_raw_reaction_add(payload):
     if user.bot: 
         return
         
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     destination = CHANNEL_MAP[channel_id_str]
     target_sheet_id = destination["sheet_id"]
@@ -401,7 +401,7 @@ async def on_message(message):
                         elif next_dt:
                             item["dt"] = next_dt - timedelta(seconds=1)
                         else:
-                            item["dt"] = target_msg.created_at
+                            item["dt"] = target_msg.created_at.replace(tzinfo=timezone.utc)
 
                 for item in user_times:
                     u_id = item["id"]
