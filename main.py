@@ -128,7 +128,7 @@ async def batch_write_to_sheets():
                         # If we deleted top-down, the row numbers below it would shift and break!
                         rows_to_delete.sort(reverse=True)
                         for r_idx in rows_to_delete:
-                            worksheet.delete_row(r_idx)
+                            worksheet.delete_rows(r_idx)
                         print(f"✅ BATCH DELETE SUCCESS: Removed {len(rows_to_delete)} orders from '{t_name}'.")
 
             except Exception as e:
