@@ -371,8 +371,17 @@ async def on_ready():
     if not getattr(bot, "_hc_commands_synced", False):
         try:
             synced = await bot.tree.sync()
+            print(f"✅ Synced {len(synced)} global Discord application command group(s).")
+
+            for guild in bot.guilds:
+                bot.tree.copy_global_to(guild=guild)
+                guild_synced = await bot.tree.sync(guild=guild)
+                print(
+                    f"✅ Synced {len(guild_synced)} Hobby Corner command group(s) "
+                    f"directly to guild {guild.name} ({guild.id})."
+                )
+
             bot._hc_commands_synced = True
-            print(f"✅ Synced {len(synced)} Discord application command group(s).")
         except Exception as e:
             print(f"❌ Slash command sync failed: {e}")
 
