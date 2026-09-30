@@ -319,6 +319,123 @@ class ResetPinMemberView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(ResetPinMemberSelect())
 
+async def send_entry_results(interaction: discord.Interaction, params=None, title="Timeclock Entries"):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries",
+        headers=timeclock_headers(),
+        params=params or {},
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+
+    if not response.ok:
+        await interaction.followup.send(
+            f"Could not load entries: {data.get('error', response.text)}",
+            ephemeral=True
+        )
+        return
+
+    entries = data.get("entries", [])
+    if not entries:
+        await interaction.followup.send("No timeclock entries matched that search.", ephemeral=True)
+        return
+
+    lines = []
+    for entry in entries:
+        out_value = entry.get("clock_out") or "OPEN"
+        review = " ⚠ needs review" if entry.get("needs_review") else ""
+        lines.append(
+            f"**Entry ID: {entry.get('id')} — {entry.get('employee_name')}**\n"
+            f"> Clock in: {entry.get('clock_in')}\n"
+            f"> Clock out: {out_value}\n"
+            f"> Status: {entry.get('status')}{review}"
+        )
+
+    pages = []
+    current = f"**{title}**\n\n"
+    for line in lines:
+        addition = line + "\n\n"
+        if len(current) + len(addition) > 1800:
+            pages.append(current.rstrip())
+            current = f"**{title} (continued)**\n\n" + addition
+        else:
+            current += addition
+
+    if current.strip():
+        pages.append(current.rstrip())
+
+    for page in pages:
+        await interaction.followup.send(page, ephemeral=True)
+
+
+class EntrySearchModal(discord.ui.Modal, title="Search Timeclock Entries"):
+    date = discord.ui.TextInput(
+        label="Date",
+        placeholder="YYYY-MM-DD",
+        required=True,
+        max_length=10
+    )
+    employee_id = discord.ui.TextInput(
+        label="Employee ID (optional)",
+        placeholder="Leave blank for all employees",
+        required=False,
+        max_length=20
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        date_value = str(self.date).strip()
+        employee_value = str(self.employee_id).strip()
+
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_value):
+            await interaction.response.send_message("Date must be YYYY-MM-DD.", ephemeral=True)
+            return
+        if employee_value and not employee_value.isdigit():
+            await interaction.response.send_message("Employee ID must be a number.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        params = {"date": date_value}
+        if employee_value:
+            params["employeeId"] = employee_value
+
+        try:
+            await send_entry_results(
+                interaction,
+                params=params,
+                title=f"Entries for {date_value}"
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+
+class EntryBrowserView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="Current Pay Period", style=discord.ButtonStyle.primary, emoji="📅")
+    async def current_period(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_entry_results(
+                interaction,
+                params={"period": "current"},
+                title="Current Pay Period Entries"
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Search by Date", style=discord.ButtonStyle.secondary, emoji="🔎")
+    async def search_date(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(EntrySearchModal())
+
+
 class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
     entry_id = discord.ui.TextInput(label="Entry ID", required=True, max_length=20)
     clock_in = discord.ui.TextInput(
@@ -422,6 +539,16 @@ class TimeclockControlPanel(discord.ui.View):
             await send_review_queue(interaction)
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Browse Entries", style=discord.ButtonStyle.secondary, emoji="📋")
+    async def browse_entries_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Choose how you want to find a timeclock entry:",
+            view=EntryBrowserView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Fix Entry", style=discord.ButtonStyle.danger, emoji="🛠️")
     async def fix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
