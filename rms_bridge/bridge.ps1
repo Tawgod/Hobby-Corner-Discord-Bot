@@ -61,6 +61,8 @@ function Invoke-BridgePost([hashtable]$Body) {
 $customerQuery = @"
 SELECT
     C.ID                 AS RMSCustomerID,
+    C.AccountNumber,
+    C.Employee,
     C.FirstName,
     C.LastName,
     C.Company,
@@ -97,11 +99,13 @@ SELECT
     CAST(ISNULL(T.SalesTax, 0) AS decimal(14,2))  AS SalesTax,
     CAST(T.Total - ISNULL(T.SalesTax, 0) AS decimal(14,2)) AS PretaxAmount
 FROM PUBLIC_Transaction T
+JOIN Customer C ON C.ID = T.CustomerID
 WHERE
     T.CustomerID IS NOT NULL
     AND T.CustomerID <> 0
     AND T.Time >= DATEADD(day, -91, GETDATE())
     AND T.Time <= GETDATE()
+    AND ISNULL(C.Employee, 0) <> 1
 ORDER BY
     T.CustomerID,
     T.Time,
@@ -129,7 +133,7 @@ ORDER BY TABLE_NAME, ORDINAL_POSITION;
   }
 
   "customers-preview" {
-    $previewQuery = $customerQuery.Replace("ORDER BY C.ID;","ORDER BY C.ID OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;")
+    $previewQuery = $customerQuery.Replace("SELECT`n    C.ID", "SELECT TOP 10`n    C.ID")
     Invoke-SqlRows $previewQuery | Format-Table -AutoSize
   }
 
