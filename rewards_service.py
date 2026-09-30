@@ -66,7 +66,19 @@ def db():
 
 def init_db():
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""create table if not exists customer_identity_map(\n            rms_customer_id text primary key, lightspeed_customer_id text not null unique,\n            legacy_discount integer null, created_at timestamptz not null default now(),\n            updated_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rms_customer_staging(\n            rms_customer_id text primary key, payload jsonb not null, legacy_discount integer null,\n            synced_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rms_transaction_staging(\n            source_ref text primary key, rms_customer_id text not null, sale_date timestamptz not null,\n            pretax_amount numeric(14,2) not null, payload jsonb not null,\n            synced_at timestamptz not null default now())""")\n        cur.execute("create index if not exists rms_tx_customer_date_idx on rms_transaction_staging(rms_customer_id,sale_date)")\n        cur.execute("""create table if not exists rewards_customer_settings(
+        cur.execute("""create table if not exists customer_identity_map(
+            rms_customer_id text primary key, lightspeed_customer_id text not null unique,
+            legacy_discount integer null, created_at timestamptz not null default now(),
+            updated_at timestamptz not null default now())""")
+        cur.execute("""create table if not exists rms_customer_staging(
+            rms_customer_id text primary key, payload jsonb not null, legacy_discount integer null,
+            synced_at timestamptz not null default now())""")
+        cur.execute("""create table if not exists rms_transaction_staging(
+            source_ref text primary key, rms_customer_id text not null, sale_date timestamptz not null,
+            pretax_amount numeric(14,2) not null, payload jsonb not null,
+            synced_at timestamptz not null default now())""")
+        cur.execute("create index if not exists rms_tx_customer_date_idx on rms_transaction_staging(rms_customer_id,sale_date)")
+        cur.execute("""create table if not exists rewards_customer_settings(
             customer_id text primary key, excluded boolean not null default false,
             override_tier integer null, legacy_discount integer null, notes text null,
             updated_at timestamptz not null default now())""")
@@ -256,7 +268,13 @@ class OverrideBody(BaseModel):
     override_tier: int|None=None
     notes: str|None=None
 
-class CustomerMapBody(BaseModel):\n    rms_customer_id: str\n    lightspeed_customer_id: str\n    legacy_discount: int|None=None\n\nclass LegacyTransaction(BaseModel):\n    customer_id: str
+class CustomerMapBody(BaseModel):
+    rms_customer_id: str
+    lightspeed_customer_id: str
+    legacy_discount: int|None=None
+
+class LegacyTransaction(BaseModel):
+    customer_id: str
     sale_date: datetime
     pretax_amount: Decimal
     source_ref: str|None=None
