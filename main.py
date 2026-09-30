@@ -69,278 +69,373 @@ hc_group = app_commands.Group(
     description="Hobby Corner staff tools"
 )
 
-timeclock_group = app_commands.Group(
-    name="timeclock",
-    description="Hobby Corner timeclock tools",
-    parent=hc_group
-)
-
 async def require_timeclock_admin(interaction: discord.Interaction):
     if interaction.guild is None or not has_timeclock_admin_role(interaction.user):
-        await interaction.response.send_message(
-            "You do not have access to this Hobby Corner timeclock command.",
-            ephemeral=True
-        )
+        if interaction.response.is_done():
+            await interaction.followup.send(
+                "You do not have access to this Hobby Corner timeclock command.",
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "You do not have access to this Hobby Corner timeclock command.",
+                ephemeral=True
+            )
         return False
     return True
 
-@timeclock_group.command(name="employees", description="List timeclock employees and their linked identities")
-async def hc_timeclock_employees(interaction: discord.Interaction):
-    if not await require_timeclock_admin(interaction):
-        return
+def timeclock_headers():
+    return {"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET}
 
-    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
-        await interaction.response.send_message("Timeclock administration is not configured.", ephemeral=True)
-        return
+async def send_employee_list(interaction: discord.Interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees",
+        headers=timeclock_headers(),
+        timeout=10
+    )
+    data = response.json() if response.content else {}
 
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        response = requests.get(
-            f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees",
-            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
-            timeout=10
+    if not response.ok:
+        await interaction.followup.send(
+            f"Could not load employees: {data.get('error', response.text)}",
+            ephemeral=True
         )
-        data = response.json() if response.content else {}
+        return
 
-        if not response.ok:
-            await interaction.followup.send(
-                f"Could not load employees: {data.get('error', response.text)}",
-                ephemeral=True
-            )
-            return
+    employees = data.get("employees", [])
+    if not employees:
+        await interaction.followup.send("No timeclock employee records exist yet.", ephemeral=True)
+        return
 
-        employees = data.get("employees", [])
-        if not employees:
-            await interaction.followup.send("No timeclock employee records exist yet.", ephemeral=True)
-            return
+    entries = []
+    for employee in employees:
+        discord_label = "unlinked"
+        if employee.get("discord_user_id"):
+            display = employee.get("discord_display_name") or employee.get("discord_username") or "Discord user"
+            username = employee.get("discord_username") or "?"
+            discord_label = f"{display} (@{username}) / {employee.get('discord_user_id')}"
 
-        entries = []
-        for employee in employees:
-            discord_label = "unlinked"
-            if employee.get("discord_user_id"):
-                display = employee.get("discord_display_name") or employee.get("discord_username") or "Discord user"
-                username = employee.get("discord_username") or "?"
-                discord_label = f"{display} (@{username}) / {employee.get('discord_user_id')}"
+        lightspeed_label = employee.get("lightspeed_user_id") or "not linked"
+        pin_label = "yes" if employee.get("has_pin") else "no"
 
-            lightspeed_label = employee.get("lightspeed_user_id") or "not linked"
-            pin_label = "yes" if employee.get("has_pin") else "no"
+        entries.append(
+            f"**{employee.get('name')}**\n"
+            f"> Employee ID: **{employee.get('id')}**\n"
+            f"> Lightspeed ID: {lightspeed_label}\n"
+            f"> Discord: {discord_label}\n"
+            f"> PIN: {pin_label}"
+        )
 
-            entries.append(
-                f"**{employee.get('name')}**\n"
-                f"> Employee ID: **{employee.get('id')}**\n"
-                f"> Lightspeed ID: {lightspeed_label}\n"
-                f"> Discord: {discord_label}\n"
-                f"> PIN: {pin_label}"
-            )
-
-        pages = []
-        current = "**Timeclock Employees**\n\n"
-        for entry in entries:
-            addition = entry + "\n\n"
-            if len(current) + len(addition) > 1800:
-                pages.append(current.rstrip())
-                current = "**Timeclock Employees (continued)**\n\n" + addition
-            else:
-                current += addition
-
-        if current.strip():
-            current += "Use /hc timeclock link with the Employee ID and Discord member to connect them."
+    pages = []
+    current = "**Timeclock Employees**\n\n"
+    for entry in entries:
+        addition = entry + "\n\n"
+        if len(current) + len(addition) > 1800:
             pages.append(current.rstrip())
-
-        for page in pages:
-            await interaction.followup.send(page, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
-
-@timeclock_group.command(name="link", description="Link a Discord member to an existing timeclock employee")
-@app_commands.describe(
-    employee_id="Employee ID from /hc timeclock employees",
-    discord_member="Discord member to link to that employee",
-    pin="Initial unique 4-digit timeclock PIN"
-)
-async def hc_timeclock_link(
-    interaction: discord.Interaction,
-    employee_id: int,
-    discord_member: discord.Member,
-    pin: str
-):
-    if not await require_timeclock_admin(interaction):
-        return
-
-    if not re.fullmatch(r"\d{4}", pin):
-        await interaction.response.send_message(
-            "The initial PIN must be exactly 4 digits.",
-            ephemeral=True
-        )
-        return
-
-    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
-        await interaction.response.send_message("Timeclock administration is not configured.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        response = requests.post(
-            f"{TIMECLOCK_API_URL}/api/timeclock/admin/link-discord",
-            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
-            json={
-                "employeeId": employee_id,
-                "discordUserId": str(discord_member.id),
-                "discordUsername": discord_member.name,
-                "discordDisplayName": discord_member.display_name,
-                "pin": pin,
-                "actor": str(interaction.user)
-            },
-            timeout=10
-        )
-        data = response.json() if response.content else {}
-
-        if response.ok:
-            employee = data.get("employee", {})
-            await interaction.followup.send(
-                f"Linked **{discord_member.display_name}** "
-                f"({discord_member.name} / {discord_member.id}) to "
-                f"**#{employee.get('id')} — {employee.get('name')}** with their initial timeclock PIN.",
-                ephemeral=True
-            )
+            current = "**Timeclock Employees (continued)**\n\n" + addition
         else:
-            await interaction.followup.send(
-                f"Could not link employee: {data.get('error', response.text)}",
-                ephemeral=True
-            )
-    except Exception as e:
-        await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
-@timeclock_group.command(name="pin", description="Assign or replace an employee's 4-digit timeclock PIN")
-@app_commands.describe(
-    employee="Discord member to link to the timeclock employee",
-    pin="Unique 4-digit timeclock PIN"
-)
-async def hc_pin(interaction: discord.Interaction, employee: discord.Member, pin: str):
-    if not await require_timeclock_admin(interaction):
-        return
+            current += addition
 
-    if not re.fullmatch(r"\d{4}", pin):
-        await interaction.response.send_message(
-            "The PIN must be exactly 4 digits.",
-            ephemeral=True
-        )
-        return
+    if current.strip():
+        pages.append(current.rstrip())
 
-    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
-        await interaction.response.send_message(
-            "Timeclock administration is not configured.",
-            ephemeral=True
-        )
-        return
+    for page in pages:
+        await interaction.followup.send(page, ephemeral=True)
 
-    await interaction.response.defer(ephemeral=True)
-    employee_name = employee.display_name or employee.name
+async def send_review_queue(interaction: discord.Interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/review",
+        headers=timeclock_headers(),
+        timeout=10
+    )
+    data = response.json() if response.content else {}
 
-    try:
-        response = requests.post(
-            f"{TIMECLOCK_API_URL}/api/timeclock/admin/assign-pin",
-            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
-            json={
-                "employeeName": employee_name,
-                "discordUserId": str(employee.id),
-                "pin": pin
-            },
-            timeout=10
-        )
-        data = response.json() if response.content else {}
-
-        if response.ok:
-            await interaction.followup.send(
-                f"Assigned a timeclock PIN to **{employee_name}**. "
-                "They can now use either their employee name or PIN.",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"Could not assign PIN: {data.get('error', response.text)}",
-                ephemeral=True
-            )
-    except Exception as e:
+    if not response.ok:
         await interaction.followup.send(
-            f"Timeclock API error: {e}",
-            ephemeral=True
-        )
-
-@timeclock_group.command(name="review", description="Show timeclock entries that need manager review")
-async def hc_review(interaction: discord.Interaction):
-    if not await require_timeclock_admin(interaction):
-        return
-
-    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
-        await interaction.response.send_message(
-            "Timeclock administration is not configured.",
+            f"Could not load review queue: {data.get('error', response.text)}",
             ephemeral=True
         )
         return
 
-    await interaction.response.defer(ephemeral=True)
+    entries = data.get("entries", [])
+    if not entries:
+        await interaction.followup.send("No timeclock entries currently need review.", ephemeral=True)
+        return
 
-    try:
-        response = requests.get(
-            f"{TIMECLOCK_API_URL}/api/timeclock/admin/review",
-            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
-            timeout=10
+    lines = []
+    for entry in entries[:20]:
+        lines.append(
+            f"**Entry {entry.get('id')} — {entry.get('employee_name')}**\n"
+            f"In: {entry.get('clock_in')}\n"
+            f"Out: {entry.get('clock_out')}\n"
+            f"Status: {entry.get('status')}"
         )
-        data = response.json() if response.content else {}
 
-        if not response.ok:
-            await interaction.followup.send(
-                f"Could not load review queue: {data.get('error', response.text)}",
-                ephemeral=True
-            )
+    await interaction.followup.send(
+        "**Timeclock Review Queue**\n\n" + "\n\n".join(lines),
+        ephemeral=True
+    )
+
+class LinkEmployeeModal(discord.ui.Modal, title="Link Timeclock Employee"):
+    employee_id = discord.ui.TextInput(
+        label="Employee ID",
+        placeholder="Use the ID shown in Employees",
+        required=True,
+        max_length=20
+    )
+    pin = discord.ui.TextInput(
+        label="Initial 4-digit PIN",
+        placeholder="1234",
+        required=True,
+        min_length=4,
+        max_length=4
+    )
+
+    def __init__(self, member: discord.Member):
+        super().__init__()
+        self.member = member
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
             return
 
-        entries = data.get("entries", [])
-        if not entries:
-            await interaction.followup.send(
-                "No timeclock entries currently need review.",
-                ephemeral=True
-            )
+        pin_value = str(self.pin).strip()
+        if not re.fullmatch(r"\d{4}", pin_value):
+            await interaction.response.send_message("PIN must be exactly 4 digits.", ephemeral=True)
             return
 
-        lines = []
-        for entry in entries[:20]:
-            lines.append(
-                f"**Entry {entry.get('id')} — {entry.get('employee_name')}**\n"
-                f"In: {entry.get('clock_in')}\n"
-                f"Out: {entry.get('clock_out')}\n"
-                f"Status: {entry.get('status')}"
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/link-discord",
+                headers=timeclock_headers(),
+                json={
+                    "employeeId": str(self.employee_id).strip(),
+                    "discordUserId": str(self.member.id),
+                    "discordUsername": self.member.name,
+                    "discordDisplayName": self.member.display_name,
+                    "pin": pin_value,
+                    "actor": str(interaction.user)
+                },
+                timeout=10
             )
+            data = response.json() if response.content else {}
 
-        await interaction.followup.send(
-            "**Timeclock Review Queue**\n\n" +
-            "\n\n".join(lines) +
-            "\n\nUse /hc timeclock fix with the entry ID to correct an entry.",
+            if response.ok:
+                employee = data.get("employee", {})
+                await interaction.followup.send(
+                    f"Linked **{self.member.display_name}** to "
+                    f"**Employee ID {employee.get('id')} — {employee.get('name')}** "
+                    "and assigned the initial PIN.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not link employee: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+class LinkMemberSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose the Discord member to link",
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        await interaction.response.send_modal(LinkEmployeeModal(member))
+
+class LinkMemberView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(LinkMemberSelect())
+
+class ResetPinModal(discord.ui.Modal, title="Reset Timeclock PIN"):
+    pin = discord.ui.TextInput(
+        label="New 4-digit PIN",
+        placeholder="1234",
+        required=True,
+        min_length=4,
+        max_length=4
+    )
+
+    def __init__(self, member: discord.Member):
+        super().__init__()
+        self.member = member
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        pin_value = str(self.pin).strip()
+        if not re.fullmatch(r"\d{4}", pin_value):
+            await interaction.response.send_message("PIN must be exactly 4 digits.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/assign-pin",
+                headers=timeclock_headers(),
+                json={
+                    "discordUserId": str(self.member.id),
+                    "pin": pin_value
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if response.ok:
+                await interaction.followup.send(
+                    f"Updated the timeclock PIN for **{self.member.display_name}**.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not update PIN: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+class ResetPinMemberSelect(discord.ui.UserSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose the employee whose PIN should change",
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        await interaction.response.send_modal(ResetPinModal(member))
+
+class ResetPinMemberView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(ResetPinMemberSelect())
+
+class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
+    entry_id = discord.ui.TextInput(label="Entry ID", required=True, max_length=20)
+    clock_in = discord.ui.TextInput(
+        label="Clock In",
+        placeholder="2026-09-30T09:00:00-05:00",
+        required=True
+    )
+    clock_out = discord.ui.TextInput(
+        label="Clock Out",
+        placeholder="2026-09-30T17:00:00-05:00",
+        required=True
+    )
+    reason = discord.ui.TextInput(
+        label="Reason",
+        placeholder="Forgot to clock out",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{str(self.entry_id).strip()}/adjust",
+                headers=timeclock_headers(),
+                json={
+                    "clockIn": str(self.clock_in).strip(),
+                    "clockOut": str(self.clock_out).strip(),
+                    "reason": str(self.reason).strip(),
+                    "actor": str(interaction.user)
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if response.ok:
+                entry = data.get("entry", {})
+                await interaction.followup.send(
+                    f"Corrected entry **{str(self.entry_id).strip()}** for "
+                    f"**{entry.get('employeeName', 'employee')}**. "
+                    "The original values remain in the audit trail.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not correct entry: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+class TimeclockControlPanel(discord.ui.View):
+    def __init__(self, is_admin: bool):
+        super().__init__(timeout=300)
+        self.is_admin = is_admin
+
+        if not is_admin:
+            for item in self.children:
+                item.disabled = True
+
+    @discord.ui.button(label="Employees", style=discord.ButtonStyle.primary, emoji="👥")
+    async def employees_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_employee_list(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Link Employee", style=discord.ButtonStyle.success, emoji="🔗")
+    async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Choose the Discord member to link:",
+            view=LinkMemberView(),
             ephemeral=True
         )
-    except Exception as e:
-        await interaction.followup.send(
-            f"Timeclock API error: {e}",
+
+    @discord.ui.button(label="Reset PIN", style=discord.ButtonStyle.secondary, emoji="🔢")
+    async def pin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Choose the linked employee:",
+            view=ResetPinMemberView(),
             ephemeral=True
         )
 
-@timeclock_group.command(name="fix", description="Correct a timeclock entry and preserve an audit record")
-@app_commands.describe(
-    entry_id="Timeclock entry ID from /hc timeclock review",
-    clock_in="Correct clock-in time in ISO format",
-    clock_out="Correct clock-out time in ISO format",
-    reason="Required reason for the correction"
-)
-async def hc_fix(
-    interaction: discord.Interaction,
-    entry_id: int,
-    clock_in: str,
-    clock_out: str,
-    reason: str
-):
-    if not await require_timeclock_admin(interaction):
+    @discord.ui.button(label="Review Queue", style=discord.ButtonStyle.secondary, emoji="⚠️")
+    async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_review_queue(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Fix Entry", style=discord.ButtonStyle.danger, emoji="🛠️")
+    async def fix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(FixEntryModal())
+
+@hc_group.command(name="timeclock", description="Open the Hobby Corner timeclock control panel")
+async def hc_timeclock(interaction: discord.Interaction):
+    if interaction.guild is None or not has_timeclock_staff_access(interaction.user):
+        await interaction.response.send_message(
+            "You do not have access to Hobby Corner timeclock tools.",
+            ephemeral=True
+        )
         return
 
     if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
@@ -350,47 +445,18 @@ async def hc_fix(
         )
         return
 
-    if not reason.strip():
-        await interaction.response.send_message(
-            "A correction reason is required.",
-            ephemeral=True
-        )
-        return
+    is_admin = has_timeclock_admin_role(interaction.user)
+    description = (
+        "Choose an admin action below."
+        if is_admin
+        else "Your staff access is active. Employee self-service buttons will be added here next."
+    )
 
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        response = requests.post(
-            f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{entry_id}/adjust",
-            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
-            json={
-                "clockIn": clock_in,
-                "clockOut": clock_out,
-                "reason": reason.strip(),
-                "actor": str(interaction.user)
-            },
-            timeout=10
-        )
-        data = response.json() if response.content else {}
-
-        if response.ok:
-            entry = data.get("entry", {})
-            await interaction.followup.send(
-                f"Corrected entry **{entry_id}** for "
-                f"**{entry.get('employeeName', 'employee')}**. "
-                "The original values and correction reason remain in the audit trail.",
-                ephemeral=True
-            )
-        else:
-            await interaction.followup.send(
-                f"Could not correct entry: {data.get('error', response.text)}",
-                ephemeral=True
-            )
-    except Exception as e:
-        await interaction.followup.send(
-            f"Timeclock API error: {e}",
-            ephemeral=True
-        )
+    await interaction.response.send_message(
+        f"**Hobby Corner Timeclock**\n{description}",
+        view=TimeclockControlPanel(is_admin),
+        ephemeral=True
+    )
 
 bot.tree.add_command(hc_group)
 
