@@ -32,6 +32,7 @@ TIERS = [
 THRESHOLDS = sorted(x[0] for x in TIERS if x[0] > 0)
 
 FIELDS = {
+    "rms_customer_id": ("RMS Customer ID", "string", False),
     "rewards_discount": ("Rewards Discount", "string", True),
     "rewards_sales_to_next_tier": ("Sales to Next Tier", "string", True),
     "rewards_status": ("Rewards Status", "string", True),
@@ -64,7 +65,7 @@ def db():
 
 def init_db():
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""create table if not exists rewards_customer_settings(
+        cur.execute("""create table if not exists customer_identity_map(\n            rms_customer_id text primary key, lightspeed_customer_id text not null unique,\n            legacy_discount integer null, created_at timestamptz not null default now(),\n            updated_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rewards_customer_settings(
             customer_id text primary key, excluded boolean not null default false,
             override_tier integer null, legacy_discount integer null, notes text null,
             updated_at timestamptz not null default now())""")
@@ -198,7 +199,7 @@ async def calculate_and_sync():
             calc = tier_for(rolling); s = settings.get(cid,{})
             if s.get("excluded"): effective,status = 0,"Excluded"
             elif s.get("override_tier") is not None: effective,status = int(s["override_tier"]),"Manual Override"
-            elif not legacy and s.get("legacy_discount") is not None and rolling == 0:
+            elif old_sales == 0 and s.get("legacy_discount") is not None and rolling == 0:
                 effective,status = int(s["legacy_discount"]),"Legacy Fallback"
             else: effective,status = calc,"Automatic"
             threshold,remaining = next_tier(rolling)
@@ -254,8 +255,7 @@ class OverrideBody(BaseModel):
     override_tier: int|None=None
     notes: str|None=None
 
-class LegacyTransaction(BaseModel):
-    customer_id: str
+class CustomerMapBody(BaseModel):\n    rms_customer_id: str\n    lightspeed_customer_id: str\n    legacy_discount: int|None=None\n\nclass LegacyTransaction(BaseModel):\n    customer_id: str
     sale_date: datetime
     pretax_amount: Decimal
     source_ref: str|None=None
@@ -301,3 +301,55 @@ def legacy(tx:LegacyTransaction,x_admin_key:str|None=Header(default=None)):
             values(%s,%s,%s,%s) on conflict(source_ref) do nothing""",
             (tx.customer_id,tx.sale_date,tx.pretax_amount,tx.source_ref)); conn.commit()
     return {"ok":True}
+
+
+class LegacyRmsTransaction(BaseModel):
+    rms_customer_id: str
+    transaction_number: str
+    sale_date: datetime
+    pretax_amount: Decimal
+
+@app.put("/admin/migration/customer-map")
+async def customer_map(body:CustomerMapBody,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    if body.legacy_discount not in {None,0,5,7,9,12,20}:
+        raise HTTPException(400,"Unexpected legacy discount")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""insert into customer_identity_map(rms_customer_id,lightspeed_customer_id,legacy_discount,updated_at)
+            values(%s,%s,%s,now()) on conflict(rms_customer_id) do update set
+            lightspeed_customer_id=excluded.lightspeed_customer_id,
+            legacy_discount=excluded.legacy_discount,updated_at=now()""",
+            (body.rms_customer_id,body.lightspeed_customer_id,body.legacy_discount))
+        cur.execute("""insert into rewards_customer_settings(customer_id,legacy_discount,updated_at)
+            values(%s,%s,now()) on conflict(customer_id) do update set
+            legacy_discount=excluded.legacy_discount,updated_at=now()""",
+            (body.lightspeed_customer_id,body.legacy_discount))
+        conn.commit()
+    if DOMAIN_PREFIX and TOKEN:
+        ls=Lightspeed()
+        await ls.ensure_fields()
+        await ls.set_fields(body.lightspeed_customer_id,{"rms_customer_id":body.rms_customer_id})
+    return {"ok":True,"rms_customer_id":body.rms_customer_id,"lightspeed_customer_id":body.lightspeed_customer_id}
+
+@app.get("/admin/migration/customer-map/{rms_customer_id}")
+def get_customer_map(rms_customer_id:str,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("select rms_customer_id,lightspeed_customer_id,legacy_discount from customer_identity_map where rms_customer_id=%s",(rms_customer_id,))
+        row=cur.fetchone()
+    if not row: raise HTTPException(404,"RMS customer mapping not found")
+    return {"rms_customer_id":row[0],"lightspeed_customer_id":row[1],"legacy_discount":row[2]}
+
+@app.post("/admin/migration/legacy-rms-transaction")
+def legacy_rms(tx:LegacyRmsTransaction,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("select lightspeed_customer_id from customer_identity_map where rms_customer_id=%s",(tx.rms_customer_id,))
+        row=cur.fetchone()
+        if not row: raise HTTPException(404,"No Lightspeed customer mapping for RMS customer")
+        source_ref=f"RMS:{tx.rms_customer_id}:{tx.transaction_number}"
+        cur.execute("""insert into rewards_legacy_transactions(customer_id,sale_date,pretax_amount,source_ref)
+            values(%s,%s,%s,%s) on conflict(source_ref) do nothing""",
+            (row[0],tx.sale_date,tx.pretax_amount,source_ref))
+        conn.commit()
+    return {"ok":True,"customer_id":row[0],"source_ref":source_ref}
