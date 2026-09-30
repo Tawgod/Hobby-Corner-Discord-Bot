@@ -2,3 +2,7 @@ discord.py
 requests
 gspread>=5.0.0
 oauth2client
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+psycopg[binary]>=3.2
