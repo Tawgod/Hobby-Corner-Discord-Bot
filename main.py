@@ -69,6 +69,12 @@ hc_group = app_commands.Group(
     description="Hobby Corner staff tools"
 )
 
+timeclock_group = app_commands.Group(
+    name="timeclock",
+    description="Hobby Corner timeclock tools",
+    parent=hc_group
+)
+
 async def require_timeclock_admin(interaction: discord.Interaction):
     if interaction.guild is None or not has_timeclock_admin_role(interaction.user):
         await interaction.response.send_message(
@@ -78,7 +84,7 @@ async def require_timeclock_admin(interaction: discord.Interaction):
         return False
     return True
 
-@hc_group.command(name="pin", description="Assign or replace an employee's 4-digit timeclock PIN")
+@timeclock_group.command(name="pin", description="Assign or replace an employee's 4-digit timeclock PIN")
 @app_commands.describe(
     employee="Discord member to link to the timeclock employee",
     pin="Unique 4-digit timeclock PIN"
@@ -134,7 +140,7 @@ async def hc_pin(interaction: discord.Interaction, employee: discord.Member, pin
             ephemeral=True
         )
 
-@hc_group.command(name="review", description="Show timeclock entries that need manager review")
+@timeclock_group.command(name="review", description="Show timeclock entries that need manager review")
 async def hc_review(interaction: discord.Interaction):
     if not await require_timeclock_admin(interaction):
         return
@@ -183,7 +189,7 @@ async def hc_review(interaction: discord.Interaction):
         await interaction.followup.send(
             "**Timeclock Review Queue**\n\n" +
             "\n\n".join(lines) +
-            "\n\nUse /hc fix with the entry ID to correct an entry.",
+            "\n\nUse /hc timeclock fix with the entry ID to correct an entry.",
             ephemeral=True
         )
     except Exception as e:
@@ -192,9 +198,9 @@ async def hc_review(interaction: discord.Interaction):
             ephemeral=True
         )
 
-@hc_group.command(name="fix", description="Correct a timeclock entry and preserve an audit record")
+@timeclock_group.command(name="fix", description="Correct a timeclock entry and preserve an audit record")
 @app_commands.describe(
-    entry_id="Timeclock entry ID from /hc review",
+    entry_id="Timeclock entry ID from /hc timeclock review",
     clock_in="Correct clock-in time in ISO format",
     clock_out="Correct clock-out time in ISO format",
     reason="Required reason for the correction"
