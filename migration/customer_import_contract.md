@@ -63,3 +63,21 @@ The migration loader resolves RMSCustomerID through the identity map and writes 
 ## Migration safety
 
 The customer importer may be rerun. It must never create a second Lightspeed customer merely because contact details changed or are duplicated; once an RMSCustomerID has a Lightspeed UUID mapping, that mapping is authoritative.
+
+
+## Employee and legacy special-discount accounts
+
+RMS `Customer.Employee = 1` is broader than literal store employees. Live RMS data shows it is also used for legacy special-discount accounts such as club/organization discount records.
+
+Migration behavior:
+
+- Import these customer records into Lightspeed normally.
+- Preserve `RMSCustomerID`, `AccountNumber`, `Employee`, and the original `LegacyDiscount`.
+- Mark `Employee = 1` customers as excluded from the automatic rolling rewards calculation.
+- Do not overwrite their legacy special discount with the automatic 0/5/7/9/12 rewards tier during migration.
+- Keep the legacy/special discount separate from the calculated rewards fields so it can be reviewed or handled by a future explicit override policy.
+- Transaction-history migration excludes purchases whose customer record has `Employee = 1`, matching the old RMS rewards logic.
+
+## Account balance
+
+RMS `AccountBalance` is not synonymous with store credit. Preserve the existing importer behavior that only treats a negative balance as customer store credit. Positive balances should not be issued as store credit.
