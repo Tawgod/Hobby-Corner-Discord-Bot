@@ -33,6 +33,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 TIMECLOCK_API_URL = os.environ.get("TIMECLOCK_API_URL", "").rstrip("/")
 TIMECLOCK_ADMIN_SECRET = os.environ.get("TIMECLOCK_ADMIN_SECRET", "")
+TIMECLOCK_ROLE_ID = os.environ.get("TIMECLOCK_ROLE_ID", "").strip()
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -44,6 +45,12 @@ else:
             "tab_name": "Raw Data"
         }
     }
+
+def has_timeclock_role(member):
+    if not TIMECLOCK_ROLE_ID:
+        return False
+    return any(str(role.id) == TIMECLOCK_ROLE_ID for role in getattr(member, "roles", []))
+
 
 # --- GLOBAL MEMORY CACHES & QUEUES ---
 MESSAGE_CACHE = {}       # Remembers SKUs to avoid Discord rate limits
@@ -281,6 +288,10 @@ async def on_raw_reaction_remove(payload):
 async def on_message(message):
     if message.author.bot: 
         return
+
+    if message.content.startswith("!timeclock"):
+        if not message.guild or not has_timeclock_role(message.author):
+            return
 
     if message.content.startswith("!timeclockpin"):
         if not message.author.guild_permissions.administrator:
