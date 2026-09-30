@@ -293,6 +293,86 @@ async def on_message(message):
         if not message.guild or not has_timeclock_role(message.author):
             return
 
+    if message.content.startswith("!timeclockreview"):
+        if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
+            await message.reply("❌ Timeclock administration is not configured on the bot.")
+            return
+
+        try:
+            response = requests.get(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/review",
+                headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if not response.ok:
+                await message.reply(f"❌ Could not load review queue: {data.get('error', response.text)}")
+                return
+
+            entries = data.get("entries", [])
+            if not entries:
+                await message.reply("✅ No timeclock entries currently need review.")
+                return
+
+            lines = []
+            for entry in entries[:20]:
+                lines.append(
+                    f"Entry {entry.get('id')} — {entry.get('employee_name')}\n"
+                    f"> In: {entry.get('clock_in')}\n"
+                    f"> Out: {entry.get('clock_out')}\n"
+                    f"> Status: {entry.get('status')}"
+                )
+
+            await message.reply(
+                "**⏱️ Timeclock Review Queue**\n" +
+                "\n".join(lines) +
+                "\n\nUse !timeclockfix <entry_id> <clock_in_iso> <clock_out_iso> <reason> to correct one."
+            )
+        except Exception as e:
+            await message.reply(f"❌ Timeclock API error: {e}")
+        return
+
+    if message.content.startswith("!timeclockfix"):
+        if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
+            await message.reply("❌ Timeclock administration is not configured on the bot.")
+            return
+
+        parts = message.content.split(maxsplit=4)
+        if len(parts) < 5:
+            await message.reply(
+                "⚠️ Use: !timeclockfix <entry_id> <clock_in_iso> <clock_out_iso> <reason>\n"
+                "Example: !timeclockfix 42 2026-09-30T09:00:00-05:00 2026-09-30T17:00:00-05:00 Forgot to clock out"
+            )
+            return
+
+        entry_id, clock_in, clock_out, reason = parts[1], parts[2], parts[3], parts[4]
+
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{entry_id}/adjust",
+                headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
+                json={
+                    "clockIn": clock_in,
+                    "clockOut": clock_out,
+                    "reason": reason,
+                    "actor": str(message.author)
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if response.ok:
+                entry = data.get("entry", {})
+                await message.reply(
+                    f"✅ Corrected entry {entry_id} for {entry.get('employeeName', 'employee')}. "
+                    "The original values and reason were preserved in the audit trail."
+                )
+            else:
+                await message.reply(f"❌ Could not correct entry: {data.get('error', response.text)}")
+        except Exception as e:
+            await message.reply(f"❌ Timeclock API error: {e}")
+        return
     if message.content.startswith("!timeclockpin"):
         if not message.author.guild_permissions.administrator:
             await message.reply("❌ You do not have permission to assign timeclock PINs.")
