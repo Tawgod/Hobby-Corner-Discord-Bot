@@ -33,7 +33,8 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 TIMECLOCK_API_URL = os.environ.get("TIMECLOCK_API_URL", "").rstrip("/")
 TIMECLOCK_ADMIN_SECRET = os.environ.get("TIMECLOCK_ADMIN_SECRET", "")
-TIMECLOCK_ROLE_ID = os.environ.get("TIMECLOCK_ROLE_ID", "").strip()
+TIMECLOCK_ADMIN_ROLE_ID = os.environ.get("TIMECLOCK_ADMIN_ROLE_ID", "").strip()
+TIMECLOCK_STAFF_ROLE_ID = os.environ.get("TIMECLOCK_STAFF_ROLE_ID", "").strip()
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -46,10 +47,16 @@ else:
         }
     }
 
-def has_timeclock_role(member):
-    if not TIMECLOCK_ROLE_ID:
+def has_role_id(member, role_id):
+    if not role_id:
         return False
-    return any(str(role.id) == TIMECLOCK_ROLE_ID for role in getattr(member, "roles", []))
+    return any(str(role.id) == role_id for role in getattr(member, "roles", []))
+
+def has_timeclock_admin_role(member):
+    return has_role_id(member, TIMECLOCK_ADMIN_ROLE_ID)
+
+def has_timeclock_staff_access(member):
+    return has_timeclock_admin_role(member) or has_role_id(member, TIMECLOCK_STAFF_ROLE_ID)
 
 
 # --- GLOBAL MEMORY CACHES & QUEUES ---
@@ -290,10 +297,12 @@ async def on_message(message):
         return
 
     if message.content.startswith("!timeclock"):
-        if not message.guild or not has_timeclock_role(message.author):
+        if not message.guild or not has_timeclock_staff_access(message.author):
             return
 
     if message.content.startswith("!timeclockreview"):
+        if not has_timeclock_admin_role(message.author):
+            return
         if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
             await message.reply("❌ Timeclock administration is not configured on the bot.")
             return
@@ -334,6 +343,8 @@ async def on_message(message):
         return
 
     if message.content.startswith("!timeclockfix"):
+        if not has_timeclock_admin_role(message.author):
+            return
         if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
             await message.reply("❌ Timeclock administration is not configured on the bot.")
             return
@@ -374,8 +385,7 @@ async def on_message(message):
             await message.reply(f"❌ Timeclock API error: {e}")
         return
     if message.content.startswith("!timeclockpin"):
-        if not message.author.guild_permissions.administrator:
-            await message.reply("❌ You do not have permission to assign timeclock PINs.")
+        if not has_timeclock_admin_role(message.author):
             return
 
         parts = message.content.split()
