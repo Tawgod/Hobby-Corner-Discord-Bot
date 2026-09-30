@@ -477,8 +477,9 @@ async def on_ready():
     print(f"✅ Logged in as {bot.user}")
     if not getattr(bot, "_hc_commands_synced", False):
         try:
-            synced = await bot.tree.sync()
-            print(f"✅ Synced {len(synced)} global Discord application command group(s).")
+            bot.tree.clear_commands(guild=None)
+            cleared = await bot.tree.sync()
+            print(f"✅ Cleared global Discord application commands ({len(cleared)} remain).")
 
             for guild in bot.guilds:
                 bot.tree.copy_global_to(guild=guild)
