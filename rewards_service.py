@@ -7,6 +7,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 import httpx
 import psycopg
+from psycopg.types.json import Jsonb
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 
@@ -65,7 +66,7 @@ def db():
 
 def init_db():
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""create table if not exists customer_identity_map(\n            rms_customer_id text primary key, lightspeed_customer_id text not null unique,\n            legacy_discount integer null, created_at timestamptz not null default now(),\n            updated_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rewards_customer_settings(
+        cur.execute("""create table if not exists customer_identity_map(\n            rms_customer_id text primary key, lightspeed_customer_id text not null unique,\n            legacy_discount integer null, created_at timestamptz not null default now(),\n            updated_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rms_customer_staging(\n            rms_customer_id text primary key, payload jsonb not null, legacy_discount integer null,\n            synced_at timestamptz not null default now())""")\n        cur.execute("""create table if not exists rms_transaction_staging(\n            source_ref text primary key, rms_customer_id text not null, sale_date timestamptz not null,\n            pretax_amount numeric(14,2) not null, payload jsonb not null,\n            synced_at timestamptz not null default now())""")\n        cur.execute("create index if not exists rms_tx_customer_date_idx on rms_transaction_staging(rms_customer_id,sale_date)")\n        cur.execute("""create table if not exists rewards_customer_settings(
             customer_id text primary key, excluded boolean not null default false,
             override_tier integer null, legacy_discount integer null, notes text null,
             updated_at timestamptz not null default now())""")
@@ -353,3 +354,69 @@ def legacy_rms(tx:LegacyRmsTransaction,x_admin_key:str|None=Header(default=None)
             (row[0],tx.sale_date,tx.pretax_amount,source_ref))
         conn.commit()
     return {"ok":True,"customer_id":row[0],"source_ref":source_ref}
+
+
+class RmsSnapshotBody(BaseModel):
+    customers: list[dict] = []
+    transactions: list[dict] = []
+
+@app.post("/admin/migration/rms-snapshot")
+def rms_snapshot(body:RmsSnapshotBody,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    customer_count=0
+    transaction_count=0
+    resolved_count=0
+    with db() as conn, conn.cursor() as cur:
+        for item in body.customers:
+            rms_id=str(item.get("RMSCustomerID") or item.get("rms_customer_id") or "").strip()
+            if not rms_id:
+                continue
+            legacy=item.get("LegacyDiscount")
+            try:
+                legacy=None if legacy in (None,"") else int(Decimal(str(legacy)))
+            except Exception:
+                legacy=None
+            cur.execute("""insert into rms_customer_staging(rms_customer_id,payload,legacy_discount,synced_at)
+                values(%s,%s,%s,now()) on conflict(rms_customer_id) do update set
+                payload=excluded.payload,legacy_discount=excluded.legacy_discount,synced_at=now()""",
+                (rms_id,Jsonb(item),legacy))
+            customer_count += 1
+        for item in body.transactions:
+            rms_id=str(item.get("RMSCustomerID") or item.get("rms_customer_id") or "").strip()
+            txno=str(item.get("TransactionNumber") or item.get("transaction_number") or "").strip()
+            sale_date=item.get("SaleDate") or item.get("sale_date")
+            pretax=item.get("PretaxAmount") or item.get("pretax_amount")
+            if not rms_id or not txno or sale_date in (None,"") or pretax in (None,""):
+                continue
+            source_ref=f"RMS:{rms_id}:{txno}"
+            cur.execute("""insert into rms_transaction_staging(source_ref,rms_customer_id,sale_date,pretax_amount,payload,synced_at)
+                values(%s,%s,%s,%s,%s,now()) on conflict(source_ref) do update set
+                rms_customer_id=excluded.rms_customer_id,sale_date=excluded.sale_date,
+                pretax_amount=excluded.pretax_amount,payload=excluded.payload,synced_at=now()""",
+                (source_ref,rms_id,sale_date,pretax,Jsonb(item)))
+            transaction_count += 1
+        cur.execute("""insert into rewards_legacy_transactions(customer_id,sale_date,pretax_amount,source_ref)
+            select m.lightspeed_customer_id,t.sale_date,t.pretax_amount,t.source_ref
+            from rms_transaction_staging t
+            join customer_identity_map m on m.rms_customer_id=t.rms_customer_id
+            on conflict(source_ref) do nothing""")
+        resolved_count=cur.rowcount
+        conn.commit()
+    return {"ok":True,"customers_staged":customer_count,"transactions_staged":transaction_count,
+            "transactions_resolved":resolved_count}
+
+@app.get("/admin/migration/staging-status")
+def staging_status(x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from rms_customer_staging")
+        customers=cur.fetchone()[0]
+        cur.execute("select count(*) from rms_transaction_staging")
+        transactions=cur.fetchone()[0]
+        cur.execute("""select count(*) from rms_transaction_staging t
+            join customer_identity_map m on m.rms_customer_id=t.rms_customer_id""")
+        mapped_transactions=cur.fetchone()[0]
+        cur.execute("select count(*) from customer_identity_map")
+        maps=cur.fetchone()[0]
+    return {"customers_staged":customers,"transactions_staged":transactions,
+            "mapped_transactions":mapped_transactions,"customer_maps":maps}
