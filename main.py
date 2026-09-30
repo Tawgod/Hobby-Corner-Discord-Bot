@@ -4,6 +4,7 @@ import discord
 import gspread
 import re
 import asyncio
+import requests
 from discord.ext import commands, tasks
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
@@ -29,6 +30,9 @@ intents.message_content = True
 intents.reactions = True
 intents.members = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+TIMECLOCK_API_URL = os.environ.get("TIMECLOCK_API_URL", "").rstrip("/")
+TIMECLOCK_ADMIN_SECRET = os.environ.get("TIMECLOCK_ADMIN_SECRET", "")
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -276,6 +280,53 @@ async def on_raw_reaction_remove(payload):
 @bot.event
 async def on_message(message):
     if message.author.bot: 
+        return
+
+    if message.content.startswith("!timeclockpin"):
+        if not message.author.guild_permissions.administrator:
+            await message.reply("❌ You do not have permission to assign timeclock PINs.")
+            return
+
+        parts = message.content.split()
+        if len(parts) != 3 or not message.mentions:
+            await message.reply("⚠️ Use: `!timeclockpin @Employee 1234`")
+            return
+
+        member = message.mentions[0]
+        pin = parts[-1].strip()
+
+        if not re.fullmatch(r"\d{4}", pin):
+            await message.reply("⚠️ The timeclock PIN must be exactly 4 digits.")
+            return
+
+        if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
+            await message.reply("❌ Timeclock PIN administration is not configured on the bot.")
+            return
+
+        employee_name = member.display_name or member.name
+
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/assign-pin",
+                headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
+                json={
+                    "employeeName": employee_name,
+                    "discordUserId": str(member.id),
+                    "pin": pin
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if response.ok:
+                await message.reply(
+                    f"✅ Assigned a timeclock PIN to **{employee_name}**. "
+                    "They can now clock in/out with either their employee name or the 4-digit PIN."
+                )
+            else:
+                await message.reply(f"❌ Could not assign PIN: {data.get('error', response.text)}")
+        except Exception as e:
+            await message.reply(f"❌ Timeclock API error: `{e}`")
         return
 
     if message.content.startswith("!recover"):
