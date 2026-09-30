@@ -11,6 +11,8 @@ Run this report immediately before the final customer migration.
 */
 SELECT
     C.ID                 AS RMSCustomerID,
+    C.AccountNumber,
+    C.Employee,
     C.FirstName,
     C.LastName,
     C.Company,
