@@ -319,6 +319,61 @@ class ResetPinMemberView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(ResetPinMemberSelect())
 
+def format_entry_choice(entry):
+    clock_in = str(entry.get("clock_in") or "")
+    clock_out = str(entry.get("clock_out") or "OPEN")
+    name = str(entry.get("employee_name") or "Employee")
+    entry_id = str(entry.get("id"))
+
+    date_part = clock_in[:10] if len(clock_in) >= 10 else "unknown date"
+    time_part = clock_in[11:16] if len(clock_in) >= 16 else ""
+    label = f"#{entry_id} • {name} • {date_part} {time_part}".strip()
+    return label[:100], clock_out
+
+
+class EntrySelect(discord.ui.Select):
+    def __init__(self, entries):
+        self.entry_map = {str(entry.get("id")): entry for entry in entries}
+        options = []
+
+        for entry in entries:
+            label, clock_out = format_entry_choice(entry)
+            status = str(entry.get("status") or "")
+            review = " • needs review" if entry.get("needs_review") else ""
+            description = f"{status} • out {clock_out}{review}"[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=str(entry.get("id")),
+                    description=description
+                )
+            )
+
+        super().__init__(
+            placeholder="Select an entry to edit",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        entry = self.entry_map.get(self.values[0])
+        if not entry:
+            await interaction.response.send_message("That entry is no longer available.", ephemeral=True)
+            return
+
+        await interaction.response.send_modal(FixEntryModal(entry=entry))
+
+
+class EntrySelectView(discord.ui.View):
+    def __init__(self, entries):
+        super().__init__(timeout=180)
+        self.add_item(EntrySelect(entries))
+
+
 async def send_entry_results(interaction: discord.Interaction, params=None, title="Timeclock Entries"):
     response = requests.get(
         f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries",
@@ -340,32 +395,32 @@ async def send_entry_results(interaction: discord.Interaction, params=None, titl
         await interaction.followup.send("No timeclock entries matched that search.", ephemeral=True)
         return
 
-    lines = []
-    for entry in entries:
-        out_value = entry.get("clock_out") or "OPEN"
-        review = " ⚠ needs review" if entry.get("needs_review") else ""
-        lines.append(
-            f"**Entry ID: {entry.get('id')} — {entry.get('employee_name')}**\n"
-            f"> Clock in: {entry.get('clock_in')}\n"
-            f"> Clock out: {out_value}\n"
-            f"> Status: {entry.get('status')}{review}"
+    chunks = [entries[i:i + 25] for i in range(0, len(entries), 25)]
+
+    for index, chunk in enumerate(chunks, start=1):
+        lines = []
+        for entry in chunk:
+            out_value = entry.get("clock_out") or "OPEN"
+            review = " ⚠ needs review" if entry.get("needs_review") else ""
+            lines.append(
+                f"**Entry ID: {entry.get('id')} — {entry.get('employee_name')}**\n"
+                f"> Clock in: {entry.get('clock_in')}\n"
+                f"> Clock out: {out_value}\n"
+                f"> Status: {entry.get('status')}{review}"
+            )
+
+        heading = title if len(chunks) == 1 else f"{title} — page {index}/{len(chunks)}"
+        message = (
+            f"**{heading}**\n\n" +
+            "\n\n".join(lines) +
+            "\n\nSelect an entry below to edit it."
         )
 
-    pages = []
-    current = f"**{title}**\n\n"
-    for line in lines:
-        addition = line + "\n\n"
-        if len(current) + len(addition) > 1800:
-            pages.append(current.rstrip())
-            current = f"**{title} (continued)**\n\n" + addition
-        else:
-            current += addition
-
-    if current.strip():
-        pages.append(current.rstrip())
-
-    for page in pages:
-        await interaction.followup.send(page, ephemeral=True)
+        await interaction.followup.send(
+            message[:1900],
+            view=EntrySelectView(chunk),
+            ephemeral=True
+        )
 
 
 class EntrySearchModal(discord.ui.Modal, title="Search Timeclock Entries"):
@@ -437,38 +492,56 @@ class EntryBrowserView(discord.ui.View):
 
 
 class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
-    entry_id = discord.ui.TextInput(label="Entry ID", required=True, max_length=20)
-    clock_in = discord.ui.TextInput(
-        label="Clock In",
-        placeholder="2026-09-30T09:00:00-05:00",
-        required=True
-    )
-    clock_out = discord.ui.TextInput(
-        label="Clock Out",
-        placeholder="2026-09-30T17:00:00-05:00",
-        required=True
-    )
-    reason = discord.ui.TextInput(
-        label="Reason",
-        placeholder="Forgot to clock out",
-        required=True,
-        style=discord.TextStyle.paragraph,
-        max_length=500
-    )
+    def __init__(self, entry=None):
+        super().__init__()
+        entry = entry or {}
+
+        self.entry_id_input = discord.ui.TextInput(
+            label="Entry ID",
+            required=True,
+            max_length=20,
+            default=str(entry.get("id") or "")
+        )
+        self.clock_in_input = discord.ui.TextInput(
+            label="Clock In",
+            placeholder="2026-09-30T09:00:00-05:00",
+            required=True,
+            default=str(entry.get("clock_in") or "")
+        )
+        self.clock_out_input = discord.ui.TextInput(
+            label="Clock Out",
+            placeholder="2026-09-30T17:00:00-05:00",
+            required=True,
+            default=str(entry.get("clock_out") or "")
+        )
+        self.reason_input = discord.ui.TextInput(
+            label="Reason",
+            placeholder="Forgot to clock out",
+            required=True,
+            style=discord.TextStyle.paragraph,
+            max_length=500
+        )
+
+        self.add_item(self.entry_id_input)
+        self.add_item(self.clock_in_input)
+        self.add_item(self.clock_out_input)
+        self.add_item(self.reason_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await require_timeclock_admin(interaction):
             return
 
         await interaction.response.defer(ephemeral=True)
+        entry_id = str(self.entry_id_input).strip()
+
         try:
             response = requests.post(
-                f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{str(self.entry_id).strip()}/adjust",
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{entry_id}/adjust",
                 headers=timeclock_headers(),
                 json={
-                    "clockIn": str(self.clock_in).strip(),
-                    "clockOut": str(self.clock_out).strip(),
-                    "reason": str(self.reason).strip(),
+                    "clockIn": str(self.clock_in_input).strip(),
+                    "clockOut": str(self.clock_out_input).strip(),
+                    "reason": str(self.reason_input).strip(),
                     "actor": str(interaction.user)
                 },
                 timeout=10
@@ -478,7 +551,7 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
             if response.ok:
                 entry = data.get("entry", {})
                 await interaction.followup.send(
-                    f"Corrected entry **{str(self.entry_id).strip()}** for "
+                    f"Corrected entry **{entry_id}** for "
                     f"**{entry.get('employeeName', 'employee')}**. "
                     "The original values remain in the audit trail.",
                     ephemeral=True
@@ -490,6 +563,7 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
                 )
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
 
 class TimeclockControlPanel(discord.ui.View):
     def __init__(self, is_admin: bool):
