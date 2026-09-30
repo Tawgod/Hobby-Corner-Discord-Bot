@@ -9,6 +9,7 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 # ==========================================
 # 1. GOOGLE SHEETS AUTHENTICATION
@@ -86,6 +87,56 @@ async def require_timeclock_admin(interaction: discord.Interaction):
 
 def timeclock_headers():
     return {"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET}
+
+CENTRAL_TZ = ZoneInfo("America/Chicago")
+
+def format_central(value):
+    if not value:
+        return "OPEN"
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        local = dt.astimezone(CENTRAL_TZ)
+        return local.strftime("%m/%d/%Y %-I:%M %p CT")
+    except Exception:
+        return str(value)
+
+def format_local_time(value):
+    if value is None:
+        return ""
+    text = str(value)
+    try:
+        parsed = datetime.strptime(text[:5], "%H:%M")
+        return parsed.strftime("%-I:%M %p")
+    except Exception:
+        return text
+
+def parse_central_datetime(value):
+    text = str(value or "").strip()
+    formats = [
+        "%m/%d/%Y %I:%M %p",
+        "%Y-%m-%d %I:%M %p",
+        "%m/%d/%Y %I %p",
+        "%Y-%m-%d %I %p",
+    ]
+    for fmt in formats:
+        try:
+            local = datetime.strptime(text, fmt).replace(tzinfo=CENTRAL_TZ)
+            return local.astimezone(timezone.utc).isoformat()
+        except ValueError:
+            pass
+    raise ValueError("Use a Central time like 09/30/2026 9:00 AM.")
+
+def parse_hhmm_12(value):
+    text = str(value or "").strip()
+    for fmt in ("%I:%M %p", "%I %p", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).strftime("%H:%M")
+        except ValueError:
+            pass
+    raise ValueError("Use a time like 9:00 AM.")
+
 
 async def send_employee_list(interaction: discord.Interaction):
     response = requests.get(
@@ -166,8 +217,8 @@ async def send_review_queue(interaction: discord.Interaction):
     for entry in entries[:20]:
         lines.append(
             f"**Entry {entry.get('id')} — {entry.get('employee_name')}**\n"
-            f"In: {entry.get('clock_in')}\n"
-            f"Out: {entry.get('clock_out')}\n"
+            f"In: {format_central(entry.get('clock_in'))}\n"
+            f"Out: {format_central(entry.get('clock_out'))}\n"
             f"Status: {entry.get('status')}"
         )
 
@@ -320,14 +371,11 @@ class ResetPinMemberView(discord.ui.View):
         self.add_item(ResetPinMemberSelect())
 
 def format_entry_choice(entry):
-    clock_in = str(entry.get("clock_in") or "")
-    clock_out = str(entry.get("clock_out") or "OPEN")
+    clock_in = format_central(entry.get("clock_in"))
+    clock_out = format_central(entry.get("clock_out"))
     name = str(entry.get("employee_name") or "Employee")
     entry_id = str(entry.get("id"))
-
-    date_part = clock_in[:10] if len(clock_in) >= 10 else "unknown date"
-    time_part = clock_in[11:16] if len(clock_in) >= 16 else ""
-    label = f"#{entry_id} • {name} • {date_part} {time_part}".strip()
+    label = f"#{entry_id} • {name} • {clock_in.replace(' CT', '')}"
     return label[:100], clock_out
 
 
@@ -404,8 +452,8 @@ async def send_entry_results(interaction: discord.Interaction, params=None, titl
             review = " ⚠ needs review" if entry.get("needs_review") else ""
             lines.append(
                 f"**Entry ID: {entry.get('id')} — {entry.get('employee_name')}**\n"
-                f"> Clock in: {entry.get('clock_in')}\n"
-                f"> Clock out: {out_value}\n"
+                f"> Clock in: {format_central(entry.get('clock_in'))}\n"
+                f"> Clock out: {format_central(entry.get('clock_out')) if entry.get('clock_out') else 'OPEN'}\n"
                 f"> Status: {entry.get('status')}{review}"
             )
 
@@ -503,16 +551,16 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
             default=str(entry.get("id") or "")
         )
         self.clock_in_input = discord.ui.TextInput(
-            label="Clock In",
-            placeholder="2026-09-30T09:00:00-05:00",
+            label="Clock In — Central",
+            placeholder="09/30/2026 9:00 AM",
             required=True,
-            default=str(entry.get("clock_in") or "")
+            default=format_central(entry.get("clock_in")).replace(" CT", "") if entry.get("clock_in") else ""
         )
         self.clock_out_input = discord.ui.TextInput(
-            label="Clock Out",
-            placeholder="2026-09-30T17:00:00-05:00",
+            label="Clock Out — Central",
+            placeholder="09/30/2026 5:00 PM",
             required=True,
-            default=str(entry.get("clock_out") or "")
+            default=format_central(entry.get("clock_out")).replace(" CT", "") if entry.get("clock_out") else ""
         )
         self.reason_input = discord.ui.TextInput(
             label="Reason",
@@ -531,6 +579,13 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
         if not await require_timeclock_admin(interaction):
             return
 
+        try:
+            clock_in_iso = parse_central_datetime(str(self.clock_in_input))
+            clock_out_iso = parse_central_datetime(str(self.clock_out_input))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True)
         entry_id = str(self.entry_id_input).strip()
 
@@ -539,8 +594,8 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
                 f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries/{entry_id}/adjust",
                 headers=timeclock_headers(),
                 json={
-                    "clockIn": str(self.clock_in_input).strip(),
-                    "clockOut": str(self.clock_out_input).strip(),
+                    "clockIn": clock_in_iso,
+                    "clockOut": clock_out_iso,
                     "reason": str(self.reason_input).strip(),
                     "actor": str(interaction.user)
                 },
@@ -565,16 +620,454 @@ class FixEntryModal(discord.ui.Modal, title="Correct Timeclock Entry"):
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
 
+class ManualEntryModal(discord.ui.Modal, title="Create Missed Time Entry"):
+    employee_id = discord.ui.TextInput(label="Employee ID", required=True, max_length=20)
+    clock_in = discord.ui.TextInput(
+        label="Clock In — Central",
+        placeholder="09/30/2026 9:00 AM",
+        required=True
+    )
+    clock_out = discord.ui.TextInput(
+        label="Clock Out — Central",
+        placeholder="09/30/2026 5:00 PM",
+        required=True
+    )
+    reason = discord.ui.TextInput(
+        label="Reason",
+        placeholder="Employee forgot to clock in",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+        try:
+            clock_in_iso = parse_central_datetime(str(self.clock_in))
+            clock_out_iso = parse_central_datetime(str(self.clock_out))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/entries",
+                headers=timeclock_headers(),
+                json={
+                    "employeeId": str(self.employee_id).strip(),
+                    "clockIn": clock_in_iso,
+                    "clockOut": clock_out_iso,
+                    "reason": str(self.reason).strip(),
+                    "actor": str(interaction.user)
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+            if response.ok:
+                entry = data.get("entry", {})
+                await interaction.followup.send(
+                    f"Created **Entry ID {entry.get('id')}** for **{entry.get('employeeName')}**\n"
+                    f"{format_central(entry.get('clock_in'))} → {format_central(entry.get('clock_out'))}",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not create entry: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+
+class TimeOffRequestModal(discord.ui.Modal, title="Request Time Off"):
+    start_date = discord.ui.TextInput(label="Start Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
+    end_date = discord.ui.TextInput(label="End Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
+    use_pto = discord.ui.TextInput(label="Use PTO? yes/no", placeholder="yes", required=True, max_length=3)
+    pto_hours = discord.ui.TextInput(label="PTO Hours (optional)", placeholder="8", required=False, max_length=8)
+    reason = discord.ui.TextInput(label="Reason (optional)", required=False, style=discord.TextStyle.paragraph, max_length=300)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        start = str(self.start_date).strip()
+        end = str(self.end_date).strip()
+        use_pto_text = str(self.use_pto).strip().lower()
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
+            await interaction.response.send_message("Dates must be YYYY-MM-DD.", ephemeral=True)
+            return
+        if use_pto_text not in ("yes", "no"):
+            await interaction.response.send_message("Use PTO must be yes or no.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/time-off/request",
+                headers=timeclock_headers(),
+                json={
+                    "discordUserId": str(interaction.user.id),
+                    "startDate": start,
+                    "endDate": end,
+                    "usePto": use_pto_text == "yes",
+                    "ptoHours": str(self.pto_hours).strip(),
+                    "reason": str(self.reason).strip()
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+            if response.ok:
+                request = data.get("request", {})
+                pto_text = "with PTO" if request.get("use_pto") else "without PTO"
+                await interaction.followup.send(
+                    f"Time-off request **#{request.get('id')}** submitted for "
+                    f"**{request.get('start_date')} through {request.get('end_date')}** {pto_text}.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not submit request: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+
+class TimeOffDecisionView(discord.ui.View):
+    def __init__(self, request):
+        super().__init__(timeout=180)
+        self.request = request
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success)
+    async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await self._review(interaction, "APPROVED")
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await self._review(interaction, "DENIED")
+
+    @discord.ui.button(label="Approve + Post Shift", style=discord.ButtonStyle.primary)
+    async def approve_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(CoverageShiftModal(self.request))
+
+    async def _review(self, interaction, decision):
+        await interaction.response.defer(ephemeral=True)
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/time-off/{self.request.get('id')}/review",
+            headers=timeclock_headers(),
+            json={"status": decision, "actor": str(interaction.user)},
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.ok:
+            await interaction.followup.send(
+                f"Request **#{self.request.get('id')}** is now **{decision.lower()}**.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Could not review request: {data.get('error', response.text)}",
+                ephemeral=True
+            )
+
+
+class CoverageShiftModal(discord.ui.Modal, title="Approve and Post Coverage Shift"):
+    shift_date = discord.ui.TextInput(label="Shift Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
+    start_time = discord.ui.TextInput(label="Start Time — Central", placeholder="9:00 AM", required=True, max_length=10)
+    end_time = discord.ui.TextInput(label="End Time — Central", placeholder="5:00 PM", required=True, max_length=10)
+    manager_note = discord.ui.TextInput(label="Manager Note (optional)", required=False, max_length=300)
+
+    def __init__(self, request):
+        super().__init__()
+        self.request = request
+        self.shift_date.default = str(request.get("start_date") or "")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            start_24 = parse_hhmm_12(str(self.start_time))
+            end_24 = parse_hhmm_12(str(self.end_time))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/time-off/{self.request.get('id')}/review",
+            headers=timeclock_headers(),
+            json={
+                "status": "APPROVED",
+                "actor": str(interaction.user),
+                "managerNote": str(self.manager_note).strip(),
+                "postOpenShift": True,
+                "shiftDate": str(self.shift_date).strip(),
+                "startTime": start_24,
+                "endTime": end_24
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.ok:
+            shift = data.get("openShift") or {}
+            await interaction.followup.send(
+                f"Approved request **#{self.request.get('id')}** and posted open shift "
+                f"**#{shift.get('id')}** for {shift.get('shift_date')} "
+                f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))}.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Could not approve request: {data.get('error', response.text)}",
+                ephemeral=True
+            )
+
+
+class TimeOffSelect(discord.ui.Select):
+    def __init__(self, requests_list):
+        self.request_map = {str(r.get("id")): r for r in requests_list}
+        options = []
+        for request in requests_list[:25]:
+            pto = "PTO" if request.get("use_pto") else "No PTO"
+            options.append(discord.SelectOption(
+                label=f"#{request.get('id')} • {request.get('employee_name')}"[:100],
+                value=str(request.get("id")),
+                description=f"{request.get('start_date')} → {request.get('end_date')} • {pto}"[:100]
+            ))
+        super().__init__(placeholder="Select a time-off request", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        request = self.request_map.get(self.values[0])
+        await interaction.response.send_message(
+            f"**Request #{request.get('id')} — {request.get('employee_name')}**\n"
+            f"{request.get('start_date')} through {request.get('end_date')}\n"
+            f"PTO: {'Yes' if request.get('use_pto') else 'No'}"
+            + (f" ({request.get('pto_hours')} hours)" if request.get('pto_hours') else "")
+            + f"\nReason: {request.get('reason') or 'None'}",
+            view=TimeOffDecisionView(request),
+            ephemeral=True
+        )
+
+
+class TimeOffSelectView(discord.ui.View):
+    def __init__(self, requests_list):
+        super().__init__(timeout=180)
+        self.add_item(TimeOffSelect(requests_list))
+
+
+async def send_pending_time_off(interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/time-off",
+        headers=timeclock_headers(),
+        params={"status": "PENDING"},
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        await interaction.followup.send(f"Could not load requests: {data.get('error', response.text)}", ephemeral=True)
+        return
+    requests_list = data.get("requests", [])
+    if not requests_list:
+        await interaction.followup.send("No pending time-off requests.", ephemeral=True)
+        return
+    await interaction.followup.send(
+        f"**Pending Time-Off Requests: {len(requests_list)}**\nSelect one to review.",
+        view=TimeOffSelectView(requests_list[:25]),
+        ephemeral=True
+    )
+
+
+class CreateShiftModal(discord.ui.Modal, title="Create Shift"):
+    employee = discord.ui.TextInput(label="Employee ID or OPEN", placeholder="12 or OPEN", required=True, max_length=20)
+    shift_date = discord.ui.TextInput(label="Shift Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
+    start_time = discord.ui.TextInput(label="Start Time — Central", placeholder="9:00 AM", required=True, max_length=10)
+    end_time = discord.ui.TextInput(label="End Time — Central", placeholder="5:00 PM", required=True, max_length=10)
+    note = discord.ui.TextInput(label="Note (optional)", required=False, max_length=300)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        employee_value = str(self.employee).strip()
+        try:
+            start_24 = parse_hhmm_12(str(self.start_time))
+            end_24 = parse_hhmm_12(str(self.end_time))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        open_shift = employee_value.upper() == "OPEN"
+        if not open_shift and not employee_value.isdigit():
+            await interaction.response.send_message("Employee must be an Employee ID or OPEN.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/shifts",
+            headers=timeclock_headers(),
+            json={
+                "employeeId": None if open_shift else employee_value,
+                "shiftDate": str(self.shift_date).strip(),
+                "startTime": start_24,
+                "endTime": end_24,
+                "open": open_shift,
+                "note": str(self.note).strip(),
+                "actor": str(interaction.user)
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.ok:
+            shift = data.get("shift", {})
+            await interaction.followup.send(
+                f"Created **{'open' if open_shift else 'assigned'} shift #{shift.get('id')}** "
+                f"for {shift.get('shift_date')} "
+                f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))}.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(f"Could not create shift: {data.get('error', response.text)}", ephemeral=True)
+
+
+class OpenShiftSelect(discord.ui.Select):
+    def __init__(self, shifts):
+        self.shift_map = {str(s.get("id")): s for s in shifts}
+        options = []
+        for shift in shifts[:25]:
+            options.append(discord.SelectOption(
+                label=f"Shift #{shift.get('id')} • {shift.get('shift_date')}"[:100],
+                value=str(shift.get("id")),
+                description=f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))} • {shift.get('note') or 'Open shift'}"[:100]
+            ))
+        super().__init__(placeholder="Select an open shift to claim", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        shift = self.shift_map.get(self.values[0])
+        await interaction.response.defer(ephemeral=True)
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/shifts/{shift.get('id')}/claim",
+            headers=timeclock_headers(),
+            json={"discordUserId": str(interaction.user.id), "actor": str(interaction.user)},
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.ok:
+            await interaction.followup.send(
+                f"You claimed **shift #{shift.get('id')}** on {shift.get('shift_date')} "
+                f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))}.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(f"Could not claim shift: {data.get('error', response.text)}", ephemeral=True)
+
+
+class OpenShiftView(discord.ui.View):
+    def __init__(self, shifts):
+        super().__init__(timeout=180)
+        self.add_item(OpenShiftSelect(shifts))
+
+
+async def send_open_shifts(interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/shifts",
+        headers=timeclock_headers(),
+        params={"openOnly": "true"},
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        await interaction.followup.send(f"Could not load shifts: {data.get('error', response.text)}", ephemeral=True)
+        return
+    shifts = data.get("shifts", [])
+    if not shifts:
+        await interaction.followup.send("There are no open shifts right now.", ephemeral=True)
+        return
+    await interaction.followup.send(
+        "**Open Shifts**\nSelect one to claim it.",
+        view=OpenShiftView(shifts[:25]),
+        ephemeral=True
+    )
+
+
+class StoreHoursModal(discord.ui.Modal, title="Set Store Hours"):
+    day = discord.ui.TextInput(label="Day (0=Sun … 6=Sat)", placeholder="1", required=True, max_length=1)
+    closed = discord.ui.TextInput(label="Closed? yes/no", placeholder="no", required=True, max_length=3)
+    open_time = discord.ui.TextInput(label="Open Time — Central", placeholder="10:00 AM", required=False, max_length=10)
+    close_time = discord.ui.TextInput(label="Close Time — Central", placeholder="8:00 PM", required=False, max_length=10)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        closed_text = str(self.closed).strip().lower()
+        if not str(self.day).strip().isdigit() or int(str(self.day).strip()) not in range(7):
+            await interaction.response.send_message("Day must be 0 through 6, Sunday through Saturday.", ephemeral=True)
+            return
+        if closed_text not in ("yes", "no"):
+            await interaction.response.send_message("Closed must be yes or no.", ephemeral=True)
+            return
+
+        is_closed = closed_text == "yes"
+        try:
+            open_24 = None if is_closed else parse_hhmm_12(str(self.open_time))
+            close_24 = None if is_closed else parse_hhmm_12(str(self.close_time))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        response = requests.put(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/store-hours/{str(self.day).strip()}",
+            headers=timeclock_headers(),
+            json={
+                "isClosed": is_closed,
+                "openTime": open_24,
+                "closeTime": close_24,
+                "actor": str(interaction.user)
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.ok:
+            hours = data.get("hours", {})
+            day_names = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"]
+            if hours.get("is_closed"):
+                detail = "Closed"
+            else:
+                detail = f"{format_local_time(hours.get('open_time'))}–{format_local_time(hours.get('close_time'))}"
+            await interaction.followup.send(
+                f"Saved **{day_names[int(str(self.day).strip())]}** store hours: **{detail}**.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(f"Could not save store hours: {data.get('error', response.text)}", ephemeral=True)
+
+
 class TimeclockControlPanel(discord.ui.View):
+    ADMIN_LABELS = {
+        "Employees", "Link Employee", "Reset PIN", "Review Queue",
+        "Browse Entries", "Fix Entry", "Create Missed Entry",
+        "Time-Off Requests", "Create Shift", "Store Hours"
+    }
+
     def __init__(self, is_admin: bool):
         super().__init__(timeout=300)
         self.is_admin = is_admin
-
         if not is_admin:
             for item in self.children:
-                item.disabled = True
+                if getattr(item, "label", None) in self.ADMIN_LABELS:
+                    item.disabled = True
 
-    @discord.ui.button(label="Employees", style=discord.ButtonStyle.primary, emoji="👥")
+    @discord.ui.button(label="Request Time Off", style=discord.ButtonStyle.primary, emoji="🏖️", row=0)
+    async def request_time_off(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TimeOffRequestModal())
+
+    @discord.ui.button(label="Open Shifts", style=discord.ButtonStyle.primary, emoji="🙋", row=0)
+    async def open_shifts(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_open_shifts(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Employees", style=discord.ButtonStyle.secondary, emoji="👥", row=1)
     async def employees_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
@@ -584,27 +1077,37 @@ class TimeclockControlPanel(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
-    @discord.ui.button(label="Link Employee", style=discord.ButtonStyle.success, emoji="🔗")
+    @discord.ui.button(label="Link Employee", style=discord.ButtonStyle.success, emoji="🔗", row=1)
     async def link_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_message(
-            "Choose the Discord member to link:",
-            view=LinkMemberView(),
-            ephemeral=True
-        )
+        await interaction.response.send_message("Choose the Discord member to link:", view=LinkMemberView(), ephemeral=True)
 
-    @discord.ui.button(label="Reset PIN", style=discord.ButtonStyle.secondary, emoji="🔢")
+    @discord.ui.button(label="Reset PIN", style=discord.ButtonStyle.secondary, emoji="🔢", row=1)
     async def pin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_message(
-            "Choose the linked employee:",
-            view=ResetPinMemberView(),
-            ephemeral=True
-        )
+        await interaction.response.send_message("Choose the linked employee:", view=ResetPinMemberView(), ephemeral=True)
 
-    @discord.ui.button(label="Review Queue", style=discord.ButtonStyle.secondary, emoji="⚠️")
+    @discord.ui.button(label="Browse Entries", style=discord.ButtonStyle.secondary, emoji="📋", row=2)
+    async def browse_entries_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_message("Choose how you want to find a timeclock entry:", view=EntryBrowserView(), ephemeral=True)
+
+    @discord.ui.button(label="Fix Entry", style=discord.ButtonStyle.danger, emoji="🛠️", row=2)
+    async def fix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(FixEntryModal())
+
+    @discord.ui.button(label="Create Missed Entry", style=discord.ButtonStyle.success, emoji="➕", row=2)
+    async def manual_entry(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(ManualEntryModal())
+
+    @discord.ui.button(label="Review Queue", style=discord.ButtonStyle.secondary, emoji="⚠️", row=2)
     async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
@@ -614,21 +1117,28 @@ class TimeclockControlPanel(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
-    @discord.ui.button(label="Browse Entries", style=discord.ButtonStyle.secondary, emoji="📋")
-    async def browse_entries_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Time-Off Requests", style=discord.ButtonStyle.secondary, emoji="✅", row=3)
+    async def time_off_requests(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_message(
-            "Choose how you want to find a timeclock entry:",
-            view=EntryBrowserView(),
-            ephemeral=True
-        )
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_pending_time_off(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
-    @discord.ui.button(label="Fix Entry", style=discord.ButtonStyle.danger, emoji="🛠️")
-    async def fix_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label="Create Shift", style=discord.ButtonStyle.success, emoji="🗓️", row=3)
+    async def create_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_modal(FixEntryModal())
+        await interaction.response.send_modal(CreateShiftModal())
+
+    @discord.ui.button(label="Store Hours", style=discord.ButtonStyle.secondary, emoji="🏪", row=3)
+    async def store_hours(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(StoreHoursModal())
+
 
 @hc_group.command(name="timeclock", description="Open the Hobby Corner timeclock control panel")
 async def hc_timeclock(interaction: discord.Interaction):
@@ -648,9 +1158,9 @@ async def hc_timeclock(interaction: discord.Interaction):
 
     is_admin = has_timeclock_admin_role(interaction.user)
     description = (
-        "Choose an admin action below."
+        "Use the staff tools at the top, or the management tools below."
         if is_admin
-        else "Your staff access is active. Employee self-service buttons will be added here next."
+        else "Use the buttons below to request time off or view open shifts."
     )
 
     await interaction.response.send_message(
