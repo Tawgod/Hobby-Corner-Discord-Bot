@@ -84,6 +84,113 @@ async def require_timeclock_admin(interaction: discord.Interaction):
         return False
     return True
 
+@timeclock_group.command(name="employees", description="List timeclock employees and their linked identities")
+async def hc_timeclock_employees(interaction: discord.Interaction):
+    if not await require_timeclock_admin(interaction):
+        return
+
+    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
+        await interaction.response.send_message("Timeclock administration is not configured.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        response = requests.get(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees",
+            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+
+        if not response.ok:
+            await interaction.followup.send(
+                f"Could not load employees: {data.get('error', response.text)}",
+                ephemeral=True
+            )
+            return
+
+        employees = data.get("employees", [])
+        if not employees:
+            await interaction.followup.send("No timeclock employee records exist yet.", ephemeral=True)
+            return
+
+        lines = []
+        for employee in employees[:40]:
+            discord_label = "unlinked"
+            if employee.get("discord_user_id"):
+                display = employee.get("discord_display_name") or employee.get("discord_username") or "Discord user"
+                username = employee.get("discord_username") or "?"
+                discord_label = f"{display} (@{username}) / {employee.get('discord_user_id')}"
+
+            lightspeed_label = employee.get("lightspeed_user_id") or "not linked"
+            pin_label = "yes" if employee.get("has_pin") else "no"
+
+            lines.append(
+                f"**#{employee.get('id')} — {employee.get('name')}**\n"
+                f"> Discord: {discord_label}\n"
+                f"> Lightspeed ID: {lightspeed_label}\n"
+                f"> PIN: {pin_label}"
+            )
+
+        await interaction.followup.send(
+            "**Timeclock Employees**\n\n" +
+            "\n\n".join(lines) +
+            "\n\nUse /hc timeclock link with an employee ID and Discord member to connect them.",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+@timeclock_group.command(name="link", description="Link a Discord member to an existing timeclock employee")
+@app_commands.describe(
+    employee_id="Employee ID from /hc timeclock employees",
+    discord_member="Discord member to link to that employee"
+)
+async def hc_timeclock_link(
+    interaction: discord.Interaction,
+    employee_id: int,
+    discord_member: discord.Member
+):
+    if not await require_timeclock_admin(interaction):
+        return
+
+    if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
+        await interaction.response.send_message("Timeclock administration is not configured.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    try:
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/link-discord",
+            headers={"x-timeclock-admin-secret": TIMECLOCK_ADMIN_SECRET},
+            json={
+                "employeeId": employee_id,
+                "discordUserId": str(discord_member.id),
+                "discordUsername": discord_member.name,
+                "discordDisplayName": discord_member.display_name,
+                "actor": str(interaction.user)
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+
+        if response.ok:
+            employee = data.get("employee", {})
+            await interaction.followup.send(
+                f"Linked **{discord_member.display_name}** "
+                f"({discord_member.name} / {discord_member.id}) to "
+                f"**#{employee.get('id')} — {employee.get('name')}**.",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send(
+                f"Could not link employee: {data.get('error', response.text)}",
+                ephemeral=True
+            )
+    except Exception as e:
+        await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 @timeclock_group.command(name="pin", description="Assign or replace an employee's 4-digit timeclock PIN")
 @app_commands.describe(
     employee="Discord member to link to the timeclock employee",
