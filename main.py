@@ -156,14 +156,23 @@ async def hc_timeclock_employees(interaction: discord.Interaction):
 @timeclock_group.command(name="link", description="Link a Discord member to an existing timeclock employee")
 @app_commands.describe(
     employee_id="Employee ID from /hc timeclock employees",
-    discord_member="Discord member to link to that employee"
+    discord_member="Discord member to link to that employee",
+    pin="Initial unique 4-digit timeclock PIN"
 )
 async def hc_timeclock_link(
     interaction: discord.Interaction,
     employee_id: int,
-    discord_member: discord.Member
+    discord_member: discord.Member,
+    pin: str
 ):
     if not await require_timeclock_admin(interaction):
+        return
+
+    if not re.fullmatch(r"\d{4}", pin):
+        await interaction.response.send_message(
+            "The initial PIN must be exactly 4 digits.",
+            ephemeral=True
+        )
         return
 
     if not TIMECLOCK_API_URL or not TIMECLOCK_ADMIN_SECRET:
@@ -181,6 +190,7 @@ async def hc_timeclock_link(
                 "discordUserId": str(discord_member.id),
                 "discordUsername": discord_member.name,
                 "discordDisplayName": discord_member.display_name,
+                "pin": pin,
                 "actor": str(interaction.user)
             },
             timeout=10
@@ -192,7 +202,7 @@ async def hc_timeclock_link(
             await interaction.followup.send(
                 f"Linked **{discord_member.display_name}** "
                 f"({discord_member.name} / {discord_member.id}) to "
-                f"**#{employee.get('id')} — {employee.get('name')}**.",
+                f"**#{employee.get('id')} — {employee.get('name')}** with their initial timeclock PIN.",
                 ephemeral=True
             )
         else:
