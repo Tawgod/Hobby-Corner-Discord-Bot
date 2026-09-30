@@ -1,0 +1,65 @@
+# RMS customer migration contract
+
+## Customer master report
+
+The customer importer should consume columns by **header name**, not fixed column position.
+
+Required migration fields:
+
+- `RMSCustomerID` — immutable RMS `Customer.ID`; the cross-system migration key.
+- `FirstName`, `LastName`, `Company`
+- `EmailAddress`, `PhoneNumber`, `FaxNumber`
+- `Address`, `Address2`, `City`, `State`, `Zip`, `Country`
+- `TaxNumber`, `TaxExempt`
+- `AccountBalance`, `TotalSales`, `AccountOpened`, `LastVisit`, `TotalVisits`, `TotalSavings`
+- `LegacyDiscount` — RMS CurrentDiscount at cutover.
+- `Vouchers`, `LastUpdated`
+
+## Lightspeed customer import behavior
+
+1. Match an already-imported customer by the migration map first: `RMSCustomerID -> Lightspeed UUID`.
+2. If no map exists, create the customer through the current Lightspeed customers API.
+3. Immediately persist the returned Lightspeed customer UUID with the RMS customer ID.
+4. Store `RMSCustomerID` as a hidden customer custom field named `rms_customer_id`.
+5. Store the old RMS discount as migration state in the rewards backend (`legacy_discount`), not as the permanent calculated rewards tier.
+6. Do not assign rewards customer groups.
+7. Do not calculate the new tier inside the customer importer. The Railway rewards worker owns rewards calculations.
+8. Failed rows must go to the customer's error queue/sheet with the RMSCustomerID and error message so reruns are idempotent.
+9. Successful rows should be removed/moved from the pending import sheet only after both Lightspeed creation/update and the identity-map write succeed.
+
+## Lightspeed field mapping
+
+| RMS export | Lightspeed customer |
+|---|---|
+| FirstName | first_name |
+| LastName | last_name |
+| Company | company_name |
+| EmailAddress | email |
+| PhoneNumber | phone |
+| FaxNumber | fax |
+| Address | physical_address_1 |
+| Address2 | physical_address_2 |
+| City | physical_city |
+| State | physical_state |
+| Zip | physical_postcode |
+| TaxNumber | tax_id |
+| RMSCustomerID | hidden custom field `rms_customer_id` |
+
+Country should be normalized to the ISO country value expected by the active Lightspeed API before sending.
+
+## Rewards legacy history report
+
+Use `rms_rewards_history_export.sql`. Each row has:
+
+- RMSCustomerID
+- TransactionNumber
+- SaleDate
+- GrossTotal
+- SalesTax
+- PretaxAmount
+
+The migration loader resolves RMSCustomerID through the identity map and writes the dated pre-tax transaction to the rewards database. TransactionNumber should be included in the source reference to make imports idempotent.
+
+## Migration safety
+
+The customer importer may be rerun. It must never create a second Lightspeed customer merely because contact details changed or are duplicated; once an RMSCustomerID has a Lightspeed UUID mapping, that mapping is authoritative.
