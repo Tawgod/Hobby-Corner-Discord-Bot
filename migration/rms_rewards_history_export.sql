@@ -20,12 +20,13 @@ SELECT
     CAST(T.Total - ISNULL(T.SalesTax, 0)
          AS decimal(14,2))                         AS PretaxAmount
 FROM PUBLIC_Transaction T
+JOIN Customer C ON C.ID = T.CustomerID
 WHERE
     T.CustomerID IS NOT NULL
     AND T.CustomerID <> 0
     AND T.Time >= DATEADD(day, -91, GETDATE())
     AND T.Time <= GETDATE()
-    AND T.Employee <> 1
+    AND ISNULL(C.Employee, 0) <> 1
 ORDER BY
     T.CustomerID,
     T.Time,
