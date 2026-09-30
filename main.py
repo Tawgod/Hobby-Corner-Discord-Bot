@@ -115,8 +115,8 @@ async def hc_timeclock_employees(interaction: discord.Interaction):
             await interaction.followup.send("No timeclock employee records exist yet.", ephemeral=True)
             return
 
-        lines = []
-        for employee in employees[:40]:
+        entries = []
+        for employee in employees:
             discord_label = "unlinked"
             if employee.get("discord_user_id"):
                 display = employee.get("discord_display_name") or employee.get("discord_username") or "Discord user"
@@ -126,19 +126,30 @@ async def hc_timeclock_employees(interaction: discord.Interaction):
             lightspeed_label = employee.get("lightspeed_user_id") or "not linked"
             pin_label = "yes" if employee.get("has_pin") else "no"
 
-            lines.append(
-                f"**#{employee.get('id')} — {employee.get('name')}**\n"
-                f"> Discord: {discord_label}\n"
+            entries.append(
+                f"**{employee.get('name')}**\n"
+                f"> Employee ID: **{employee.get('id')}**\n"
                 f"> Lightspeed ID: {lightspeed_label}\n"
+                f"> Discord: {discord_label}\n"
                 f"> PIN: {pin_label}"
             )
 
-        await interaction.followup.send(
-            "**Timeclock Employees**\n\n" +
-            "\n\n".join(lines) +
-            "\n\nUse /hc timeclock link with an employee ID and Discord member to connect them.",
-            ephemeral=True
-        )
+        pages = []
+        current = "**Timeclock Employees**\n\n"
+        for entry in entries:
+            addition = entry + "\n\n"
+            if len(current) + len(addition) > 1800:
+                pages.append(current.rstrip())
+                current = "**Timeclock Employees (continued)**\n\n" + addition
+            else:
+                current += addition
+
+        if current.strip():
+            current += "Use /hc timeclock link with the Employee ID and Discord member to connect them."
+            pages.append(current.rstrip())
+
+        for page in pages:
+            await interaction.followup.send(page, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
