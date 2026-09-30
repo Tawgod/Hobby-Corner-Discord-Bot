@@ -1,0 +1,9 @@
+{
+  "sqlServer": "localhost,1433",
+  "database": "REPLACE_WITH_RMS_DATABASE_NAME",
+  "sqlUser": "hobbycorner_read",
+  "sqlPassword": "REPLACE_WITH_SQL_PASSWORD",
+  "apiBaseUrl": "https://hobby-corner-rewards-production.up.railway.app",
+  "apiKey": "REPLACE_WITH_REWARDS_ADMIN_KEY",
+  "batchSize": 250
+}
