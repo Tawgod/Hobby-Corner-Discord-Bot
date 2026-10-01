@@ -529,7 +529,8 @@ pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8
 <h2>Run on RMS server</h2>
 <button onclick="queueJob('snapshot')">Refresh RMS Data</button>
 <button class="secondary" onclick="queueJob('test')">Connection Test</button>
-<button class="secondary" onclick="queueJob('schema')">Schema Check</button>
+<button class="secondary" onclick="queueJob('schema')">Customer Schema Check</button>
+<button class="secondary" onclick="queueJob('product-schema')">Product / Inventory Schema Scan</button>
 <p class="small">The RMS server checks for queued work periodically. No inbound connection to SQL Server is opened.</p>
 </div>
 <div class="card"><h2>Recent jobs</h2><button class="secondary" onclick="loadJobs()">Refresh status</button>
@@ -551,7 +552,7 @@ setInterval(()=>{if(document.getElementById('key').value.trim())loadJobs()},1500
 def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     job_type=body.job_type.strip().lower()
-    if job_type not in {"snapshot","test","schema"}:
+    if job_type not in {"snapshot","test","schema","product-schema"}:
         raise HTTPException(400,"Unsupported RMS job type")
     with db() as conn, conn.cursor() as cur:
         cur.execute("""select id from rms_bridge_jobs
