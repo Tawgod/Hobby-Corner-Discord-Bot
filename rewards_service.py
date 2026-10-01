@@ -80,8 +80,9 @@ def init_db():
         cur.execute("create index if not exists rms_tx_customer_date_idx on rms_transaction_staging(rms_customer_id,sale_date)")
         cur.execute("""create table if not exists rewards_customer_settings(
             customer_id text primary key, excluded boolean not null default false,
-            override_tier integer null, legacy_discount integer null, notes text null,
+            override_tier integer null, legacy_discount integer null, special_discount integer null, notes text null,
             updated_at timestamptz not null default now())""")
+        cur.execute("alter table rewards_customer_settings add column if not exists special_discount integer null")
         cur.execute("""create table if not exists rewards_legacy_transactions(
             id bigserial primary key, customer_id text not null, sale_date timestamptz not null,
             pretax_amount numeric(14,2) not null, source_ref text null unique,
@@ -205,12 +206,13 @@ async def calculate_and_sync():
             cur.execute("""select customer_id,coalesce(sum(pretax_amount),0) from rewards_legacy_transactions
                            where sale_date >= %s and sale_date <= %s group by customer_id""",(cutoff,started))
             legacy = {r[0]:Decimal(r[1]) for r in cur.fetchall()}
-            cur.execute("select customer_id,excluded,override_tier,legacy_discount from rewards_customer_settings")
-            settings = {r[0]:{"excluded":r[1],"override_tier":r[2],"legacy_discount":r[3]} for r in cur.fetchall()}
+            cur.execute("select customer_id,excluded,override_tier,legacy_discount,special_discount from rewards_customer_settings")
+            settings = {r[0]:{"excluded":r[1],"override_tier":r[2],"legacy_discount":r[3],"special_discount":r[4]} for r in cur.fetchall()}
         for cid,c in customers.items():
             ls_sales = money(current.get(cid,0)); old_sales = money(legacy.get(cid,0)); rolling = money(ls_sales+old_sales)
             calc = tier_for(rolling); s = settings.get(cid,{})
-            if s.get("excluded"): effective,status = 0,"Excluded"
+            if s.get("special_discount") is not None: effective,status = int(s["special_discount"]),"Special Discount"
+            elif s.get("excluded"): effective,status = 0,"Excluded"
             elif s.get("override_tier") is not None: effective,status = int(s["override_tier"]),"Manual Override"
             elif old_sales == 0 and s.get("legacy_discount") is not None and rolling == 0:
                 effective,status = int(s["legacy_discount"]),"Legacy Fallback"
@@ -331,7 +333,7 @@ class LegacyRmsTransaction(BaseModel):
 @app.put("/admin/migration/customer-map")
 async def customer_map(body:CustomerMapBody,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
-    if body.legacy_discount not in {None,0,5,7,9,12,20}:
+    if body.legacy_discount is not None and not (0 <= body.legacy_discount <= 100):
         raise HTTPException(400,"Unexpected legacy discount")
     with db() as conn, conn.cursor() as cur:
         cur.execute("""insert into customer_identity_map(rms_customer_id,lightspeed_customer_id,legacy_discount,updated_at)
@@ -339,10 +341,29 @@ async def customer_map(body:CustomerMapBody,x_admin_key:str|None=Header(default=
             lightspeed_customer_id=excluded.lightspeed_customer_id,
             legacy_discount=excluded.legacy_discount,updated_at=now()""",
             (body.rms_customer_id,body.lightspeed_customer_id,body.legacy_discount))
-        cur.execute("""insert into rewards_customer_settings(customer_id,legacy_discount,updated_at)
-            values(%s,%s,now()) on conflict(customer_id) do update set
-            legacy_discount=excluded.legacy_discount,updated_at=now()""",
-            (body.lightspeed_customer_id,body.legacy_discount))
+        cur.execute("select payload,legacy_discount from rms_customer_staging where rms_customer_id=%s",(body.rms_customer_id,))
+        staged=cur.fetchone()
+        employee=False
+        special_discount=None
+        legacy_discount=body.legacy_discount
+        if staged:
+            payload=staged[0] or {}
+            legacy_discount=staged[1] if staged[1] is not None else legacy_discount
+            raw_employee=payload.get("Employee")
+            employee = raw_employee in (True,1,"1","true","True","TRUE")
+            if legacy_discount is not None:
+                standard_tiers={0,5,7,9,12}
+                if employee and int(legacy_discount) > 0:
+                    special_discount=int(legacy_discount)
+                elif (not employee) and int(legacy_discount) not in standard_tiers:
+                    special_discount=int(legacy_discount)
+        cur.execute("""insert into rewards_customer_settings(customer_id,excluded,legacy_discount,special_discount,notes,updated_at)
+            values(%s,%s,%s,%s,%s,now()) on conflict(customer_id) do update set
+            excluded=excluded.excluded,legacy_discount=excluded.legacy_discount,
+            special_discount=excluded.special_discount,notes=coalesce(rewards_customer_settings.notes,excluded.notes),
+            updated_at=now()""",
+            (body.lightspeed_customer_id,employee,legacy_discount,special_discount,
+             "Imported from RMS employee/special discount account" if employee or special_discount is not None else None))
         conn.commit()
     if DOMAIN_PREFIX and TOKEN:
         ls=Lightspeed()
