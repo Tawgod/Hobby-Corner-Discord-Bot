@@ -1067,11 +1067,58 @@ class StoreHoursModal(discord.ui.Modal, title="Set Store Hours"):
             await interaction.followup.send(f"Could not save store hours: {data.get('error', response.text)}", ephemeral=True)
 
 
+class PtoEligibilityModal(discord.ui.Modal, title="Set PTO Eligibility"):
+    employee_id = discord.ui.TextInput(label="Employee ID", required=True, max_length=20)
+    eligible = discord.ui.TextInput(label="PTO Eligible? yes/no", placeholder="yes", required=True, max_length=3)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        employee_id = str(self.employee_id).strip()
+        eligible_text = str(self.eligible).strip().lower()
+
+        if not employee_id.isdigit():
+            await interaction.response.send_message("Employee ID must be a number.", ephemeral=True)
+            return
+        if eligible_text not in ("yes", "no"):
+            await interaction.response.send_message("PTO Eligible must be yes or no.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            response = requests.post(
+                f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees/{employee_id}/pto-eligibility",
+                headers=timeclock_headers(),
+                json={
+                    "eligible": eligible_text == "yes",
+                    "actor": str(interaction.user)
+                },
+                timeout=10
+            )
+            data = response.json() if response.content else {}
+
+            if response.ok:
+                await interaction.followup.send(
+                    f"Set **{data.get('employeeName')}** PTO eligibility to "
+                    f"**{'Yes' if data.get('ptoEligible') else 'No'}**.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(
+                    f"Could not update PTO eligibility: {data.get('error', response.text)}",
+                    ephemeral=True
+                )
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+
 class TimeclockControlPanel(discord.ui.View):
     ADMIN_LABELS = {
         "Employees", "Link Employee", "Reset PIN", "Review Queue",
         "Browse Entries", "Fix Entry", "Create Missed Entry",
-        "Time-Off Requests", "Create Shift", "Store Hours"
+        "Time-Off Requests", "Create Shift", "Store Hours", "PTO Eligibility"
     }
 
     def __init__(self, is_admin: bool):
@@ -1165,6 +1212,13 @@ class TimeclockControlPanel(discord.ui.View):
         if not await require_timeclock_admin(interaction):
             return
         await interaction.response.send_modal(StoreHoursModal())
+
+    @discord.ui.button(label="PTO Eligibility", style=discord.ButtonStyle.secondary, emoji="💼", row=3)
+    async def pto_eligibility(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(PtoEligibilityModal())
+
 
 
 @hc_group.command(name="timeclock", description="Open the Hobby Corner timeclock control panel")
