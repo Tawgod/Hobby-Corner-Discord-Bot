@@ -422,12 +422,17 @@ def rms_snapshot(body:RmsSnapshotBody,x_admin_key:str|None=Header(default=None))
             customer_count += 1
         for item in body.transactions:
             rms_id=str(item.get("RMSCustomerID") or item.get("rms_customer_id") or "").strip()
-            txno=str(item.get("TransactionNumber") or item.get("transaction_number") or "").strip()
-            sale_date=item.get("SaleDate") or item.get("sale_date")
-            pretax=item.get("PretaxAmount") or item.get("pretax_amount")
+            txno_raw=item.get("TransactionNumber") if item.get("TransactionNumber") is not None else item.get("transaction_number")
+            txno="" if txno_raw is None else str(txno_raw).strip()
+            sale_date=item.get("SaleDate") if item.get("SaleDate") is not None else item.get("sale_date")
+            pretax=item.get("PretaxAmount") if item.get("PretaxAmount") is not None else item.get("pretax_amount")
+            store_id=item.get("StoreID") if item.get("StoreID") is not None else item.get("store_id")
+            batch_no=item.get("BatchNumber") if item.get("BatchNumber") is not None else item.get("batch_number")
             if not rms_id or not txno or sale_date in (None,"") or pretax in (None,""):
                 continue
-            source_ref=f"RMS:{rms_id}:{txno}"
+            store_part="" if store_id is None else str(store_id).strip()
+            batch_part="" if batch_no is None else str(batch_no).strip()
+            source_ref=f"RMS:{rms_id}:{store_part}:{batch_part}:{txno}"
             cur.execute("""insert into rms_transaction_staging(source_ref,rms_customer_id,sale_date,pretax_amount,payload,synced_at)
                 values(%s,%s,%s,%s,%s,now()) on conflict(source_ref) do update set
                 rms_customer_id=excluded.rms_customer_id,sale_date=excluded.sale_date,
