@@ -81,3 +81,21 @@ Migration behavior:
 ## Account balance
 
 RMS `AccountBalance` is not synonymous with store credit. Preserve the existing importer behavior that only treats a negative balance as customer store credit. Positive balances should not be issued as store credit.
+
+
+## Legacy discount classification confirmed from RMS
+
+Live RMS counts show the automatic rewards tiers are used by normal customers at 0%, 5%, 7%, 9%, and 12%.
+
+Eight non-employee customers have a 10% CurrentDiscount. Treat these as legacy/special manual discounts, not as an automatic rewards tier.
+
+Employee-flagged RMS records use 0%, 10%, 15%, 20%, and 30% discounts. These records are excluded from automatic rolling rewards. If their legacy discount is greater than zero, preserve it as a separate special discount.
+
+Classification at customer mapping time:
+
+- Employee = 0 and LegacyDiscount in {0,5,7,9,12}: automatic rewards participant.
+- Employee = 0 and LegacyDiscount outside {0,5,7,9,12}: special/manual discount; preserve separately.
+- Employee = 1 and LegacyDiscount = 0: excluded from automatic rewards, no special discount.
+- Employee = 1 and LegacyDiscount > 0: excluded from automatic rewards and preserve LegacyDiscount as special discount.
+
+The automatic rewards override field remains reserved for an explicit manual override of the rolling rewards system. It should not be reused to hold RMS special discounts.
