@@ -79,6 +79,19 @@ def init_db():
             pretax_amount numeric(14,2) not null, payload jsonb not null,
             synced_at timestamptz not null default now())""")
         cur.execute("create index if not exists rms_tx_customer_date_idx on rms_transaction_staging(rms_customer_id,sale_date)")
+        cur.execute("""create table if not exists discord_customer_staging(
+            source_ref text primary key,
+            discord_user_id text null,
+            customer_name text null,
+            phone text null,
+            email text null,
+            discord_sheet_name text null,
+            discord_server_name text null,
+            payload jsonb not null,
+            active boolean not null default true,
+            synced_at timestamptz not null default now())""")
+        cur.execute("create index if not exists discord_customer_user_idx on discord_customer_staging(discord_user_id)")
+        cur.execute("create index if not exists discord_customer_email_idx on discord_customer_staging(lower(email))")
         cur.execute("""create table if not exists rewards_customer_settings(
             customer_id text primary key, excluded boolean not null default false,
             override_tier integer null, legacy_discount integer null, special_discount integer null, notes text null,
@@ -411,6 +424,9 @@ class RmsSnapshotBody(BaseModel):
     customers: list[dict] = []
     transactions: list[dict] = []
 
+class DiscordCustomerSyncBody(BaseModel):
+    customers: list[dict] = []
+
 class RmsJobCreate(BaseModel):
     job_type: str
 
@@ -599,3 +615,52 @@ def complete_rms_job(job_id:int,body:RmsJobComplete,x_admin_key:str|None=Header(
             raise HTTPException(409,"Job is not running or does not exist")
         conn.commit()
     return {"ok":True,"id":job_id,"status":status}
+
+
+@app.post("/admin/customer-source/discord-sheet")
+def sync_discord_customers(body:DiscordCustomerSyncBody,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    synced=0
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("update discord_customer_staging set active=false")
+        for item in body.customers:
+            row_number=item.get("row_number")
+            if row_number in (None,""):
+                continue
+            source_ref=f"MASTER_CUSTOMER:{row_number}"
+            discord_id=str(item.get("discord_user_id") or "").strip() or None
+            name=str(item.get("name") or "").strip() or None
+            phone=str(item.get("phone") or "").strip() or None
+            email=str(item.get("email") or "").strip().lower() or None
+            sheet_name=str(item.get("discord_sheet_name") or "").strip() or None
+            server_name=str(item.get("discord_server_name") or "").strip() or None
+            cur.execute("""insert into discord_customer_staging(
+                source_ref,discord_user_id,customer_name,phone,email,
+                discord_sheet_name,discord_server_name,payload,active,synced_at)
+                values(%s,%s,%s,%s,%s,%s,%s,%s,true,now())
+                on conflict(source_ref) do update set
+                discord_user_id=excluded.discord_user_id,
+                customer_name=excluded.customer_name,
+                phone=excluded.phone,
+                email=excluded.email,
+                discord_sheet_name=excluded.discord_sheet_name,
+                discord_server_name=excluded.discord_server_name,
+                payload=excluded.payload,
+                active=true,synced_at=now()""",
+                (source_ref,discord_id,name,phone,email,sheet_name,server_name,Jsonb(item)))
+            synced += 1
+        conn.commit()
+    return {"ok":True,"customers_synced":synced}
+
+
+@app.get("/admin/customer-source/discord-sheet/status")
+def discord_customer_status(x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("select count(*) from discord_customer_staging where active")
+        active=cur.fetchone()[0]
+        cur.execute("select count(*) from discord_customer_staging where active and discord_user_id is not null")
+        with_id=cur.fetchone()[0]
+        cur.execute("select max(synced_at) from discord_customer_staging")
+        last_sync=cur.fetchone()[0]
+    return {"active_customers":active,"with_discord_id":with_id,"last_sync":last_sync}
