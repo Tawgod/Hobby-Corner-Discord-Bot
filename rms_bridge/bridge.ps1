@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("test","schema","customers-preview","snapshot")]
+  [ValidateSet("test","schema","product-schema","customers-preview","snapshot")]
   [string]$Action = "test",
   [string]$ConfigPath = "$PSScriptRoot\config.json"
 )
@@ -132,6 +132,47 @@ WHERE TABLE_NAME IN ('Customer','PUBLIC_Transaction')
 ORDER BY TABLE_NAME, ORDINAL_POSITION;
 "@
     Invoke-SqlRows $q | Format-Table -AutoSize
+  }
+
+  "product-schema" {
+    $q = @"
+SELECT
+    TABLE_NAME,
+    COLUMN_NAME,
+    DATA_TYPE,
+    CHARACTER_MAXIMUM_LENGTH
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE
+    TABLE_NAME LIKE '%Item%'
+    OR TABLE_NAME LIKE '%Product%'
+    OR TABLE_NAME LIKE '%Inventory%'
+    OR TABLE_NAME LIKE '%Supplier%'
+    OR TABLE_NAME LIKE '%Department%'
+    OR TABLE_NAME LIKE '%Category%'
+    OR TABLE_NAME LIKE '%Purchase%'
+    OR TABLE_NAME LIKE '%Transaction%'
+    OR COLUMN_NAME LIKE '%Reorder%'
+    OR COLUMN_NAME LIKE '%Restock%'
+    OR COLUMN_NAME LIKE '%Quantity%'
+    OR COLUMN_NAME LIKE '%Qty%'
+    OR COLUMN_NAME LIKE '%OnHand%'
+    OR COLUMN_NAME LIKE '%OnOrder%'
+    OR COLUMN_NAME LIKE '%Supplier%'
+    OR COLUMN_NAME LIKE '%Department%'
+    OR COLUMN_NAME LIKE '%Category%'
+    OR COLUMN_NAME LIKE '%Discontinued%'
+    OR COLUMN_NAME LIKE '%Inactive%'
+    OR COLUMN_NAME LIKE '%LastSold%'
+    OR COLUMN_NAME LIKE '%LastSale%'
+    OR COLUMN_NAME LIKE '%LastReceived%'
+    OR COLUMN_NAME LIKE '%LastPurchase%'
+    OR COLUMN_NAME LIKE '%Cost%'
+    OR COLUMN_NAME LIKE '%Price%'
+ORDER BY TABLE_NAME, ORDINAL_POSITION;
+"@
+    $rows = @(Invoke-SqlRows $q)
+    Write-Host "Product/inventory schema candidates: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
   }
 
   "customers-preview" {
