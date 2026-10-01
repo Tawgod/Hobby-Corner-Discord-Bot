@@ -93,6 +93,8 @@ ORDER BY C.ID;
 $transactionQuery = @"
 SELECT
     T.CustomerID                                  AS RMSCustomerID,
+    T.StoreID,
+    T.BatchNumber,
     T.TransactionNumber,
     T.Time                                        AS SaleDate,
     CAST(T.Total AS decimal(14,2))                 AS GrossTotal,
