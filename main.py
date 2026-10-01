@@ -37,6 +37,10 @@ TIMECLOCK_API_URL = os.environ.get("TIMECLOCK_API_URL", "").rstrip("/")
 TIMECLOCK_ADMIN_SECRET = os.environ.get("TIMECLOCK_ADMIN_SECRET", "")
 TIMECLOCK_ADMIN_ROLE_ID = os.environ.get("TIMECLOCK_ADMIN_ROLE_ID", "").strip()
 TIMECLOCK_STAFF_ROLE_ID = os.environ.get("TIMECLOCK_STAFF_ROLE_ID", "").strip()
+CUSTOMER_SYNC_API_URL = os.environ.get("CUSTOMER_SYNC_API_URL", "").rstrip("/")
+CUSTOMER_SYNC_ADMIN_KEY = os.environ.get("CUSTOMER_SYNC_ADMIN_KEY", "")
+MASTER_CUSTOMER_SHEET_ID = os.environ.get("MASTER_CUSTOMER_SHEET_ID", "").strip()
+MASTER_CUSTOMER_TAB = os.environ.get("MASTER_CUSTOMER_TAB", "Customer").strip() or "Customer"
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -1267,6 +1271,122 @@ async def batch_write_to_sheets():
                 SHEET_DELETE_QUEUE.extend(deletes_to_process)
 
 
+
+def normalize_discord_match(value):
+    return re.sub(r"\s+", " ", str(value or "").strip().lstrip("@")).casefold()
+
+def discord_aliases(value):
+    text = str(value or "")
+    aliases = []
+    for part in re.split(r"[,;/|]+", text):
+        normalized = normalize_discord_match(part)
+        if normalized:
+            aliases.append(normalized)
+    return list(dict.fromkeys(aliases))
+
+async def sync_master_customer_list_once():
+    if client is None or not MASTER_CUSTOMER_SHEET_ID:
+        return
+    if not CUSTOMER_SYNC_API_URL or not CUSTOMER_SYNC_ADMIN_KEY:
+        print("WARNING: Customer sync Railway endpoint is not configured.")
+        return
+
+    sheet = client.open_by_key(MASTER_CUSTOMER_SHEET_ID)
+    worksheet = sheet.worksheet(MASTER_CUSTOMER_TAB)
+    rows = worksheet.get_all_values()
+    if not rows:
+        return
+
+    headers = {str(v).strip().casefold(): i for i, v in enumerate(rows[0])}
+    required = ["name", "phone", "discord", "email", "discord id"]
+    missing = [h for h in required if h not in headers]
+    if missing:
+        print(f"WARNING: Master Customer List missing columns: {missing}")
+        return
+
+    member_by_id = {}
+    members_by_name = {}
+    for guild in bot.guilds:
+        for member in guild.members:
+            if member.bot:
+                continue
+            member_by_id[str(member.id)] = member
+            candidates = {
+                normalize_discord_match(member.name),
+                normalize_discord_match(member.display_name),
+                normalize_discord_match(getattr(member, "global_name", None)),
+            }
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                members_by_name.setdefault(candidate, {})
+                members_by_name[candidate][str(member.id)] = member
+
+    id_updates = []
+    payload = []
+    discord_id_col = headers["discord id"] + 1
+
+    for row_number, row in enumerate(rows[1:], start=2):
+        def cell(header):
+            idx = headers[header]
+            return row[idx].strip() if idx < len(row) else ""
+
+        name = cell("name")
+        phone = cell("phone")
+        discord_sheet_name = cell("discord")
+        email = cell("email")
+        discord_user_id = cell("discord id")
+
+        member = None
+        if discord_user_id:
+            member = member_by_id.get(discord_user_id)
+        elif discord_sheet_name:
+            matches = {}
+            for alias in discord_aliases(discord_sheet_name):
+                for uid, candidate_member in members_by_name.get(alias, {}).items():
+                    matches[uid] = candidate_member
+            if len(matches) == 1:
+                discord_user_id, member = next(iter(matches.items()))
+                id_updates.append(gspread.Cell(row_number, discord_id_col, discord_user_id))
+
+        payload.append({
+            "row_number": row_number,
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "discord_sheet_name": discord_sheet_name,
+            "discord_user_id": discord_user_id,
+            "discord_server_name": member.display_name if member else "",
+            "discord_username": member.name if member else "",
+        })
+
+    if id_updates:
+        worksheet.update_cells(id_updates, value_input_option="RAW")
+        print(f"✅ Master Customer List: filled {len(id_updates)} unambiguous Discord ID(s).")
+
+    response = requests.post(
+        f"{CUSTOMER_SYNC_API_URL}/admin/customer-source/discord-sheet",
+        headers={"x-admin-key": CUSTOMER_SYNC_ADMIN_KEY},
+        json={"customers": payload},
+        timeout=30
+    )
+    if not response.ok:
+        raise RuntimeError(f"Customer sync API returned {response.status_code}: {response.text}")
+
+    data = response.json()
+    print(f"✅ Master Customer List sync: {data.get('customers_synced', 0)} customer row(s) sent to Railway.")
+
+@tasks.loop(hours=1)
+async def sync_master_customer_list_hourly():
+    try:
+        await sync_master_customer_list_once()
+    except Exception as e:
+        print(f"❌ Master Customer List hourly sync failed: {e}")
+
+@sync_master_customer_list_hourly.before_loop
+async def before_master_customer_sync():
+    await bot.wait_until_ready()
+
 # ==========================================
 # 4. BOT EVENTS & LISTENERS
 # ==========================================
@@ -1294,6 +1414,10 @@ async def on_ready():
     if not batch_write_to_sheets.is_running():
         batch_write_to_sheets.start()
         print("✅ Batch upload engine started.")
+
+    if not sync_master_customer_list_hourly.is_running():
+        sync_master_customer_list_hourly.start()
+        print("✅ Hourly Master Customer List sync started.")
 
 @bot.event
 async def on_raw_reaction_add(payload):
