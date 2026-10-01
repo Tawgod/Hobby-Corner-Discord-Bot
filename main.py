@@ -172,13 +172,15 @@ async def send_employee_list(interaction: discord.Interaction):
 
         lightspeed_label = employee.get("lightspeed_user_id") or "not linked"
         pin_label = "yes" if employee.get("has_pin") else "no"
+        pto_label = "yes" if employee.get("pto_eligible") else "no"
 
         entries.append(
             f"**{employee.get('name')}**\n"
             f"> Employee ID: **{employee.get('id')}**\n"
             f"> Lightspeed ID: {lightspeed_label}\n"
             f"> Discord: {discord_label}\n"
-            f"> PIN: {pin_label}"
+            f"> PIN: {pin_label}\n"
+            f"> PTO eligible: {pto_label}"
         )
 
     pages = []
@@ -689,19 +691,36 @@ class TimeOffRequestModal(discord.ui.Modal, title="Request Time Off"):
     start_date = discord.ui.TextInput(label="Start Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
     end_date = discord.ui.TextInput(label="End Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
     use_pto = discord.ui.TextInput(label="Use PTO? yes/no", placeholder="yes", required=True, max_length=3)
-    pto_hours = discord.ui.TextInput(label="PTO Hours (optional)", placeholder="8", required=False, max_length=8)
+    pto_hours = discord.ui.TextInput(
+        label="PTO Hours (required if yes)",
+        placeholder="8",
+        required=False,
+        max_length=8
+    )
     reason = discord.ui.TextInput(label="Reason (optional)", required=False, style=discord.TextStyle.paragraph, max_length=300)
 
     async def on_submit(self, interaction: discord.Interaction):
         start = str(self.start_date).strip()
         end = str(self.end_date).strip()
         use_pto_text = str(self.use_pto).strip().lower()
+        pto_hours_text = str(self.pto_hours).strip()
+
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", end):
             await interaction.response.send_message("Dates must be YYYY-MM-DD.", ephemeral=True)
             return
         if use_pto_text not in ("yes", "no"):
             await interaction.response.send_message("Use PTO must be yes or no.", ephemeral=True)
             return
+        if use_pto_text == "yes":
+            try:
+                if float(pto_hours_text) <= 0:
+                    raise ValueError
+            except ValueError:
+                await interaction.response.send_message(
+                    "Enter how many PTO hours you want to use.",
+                    ephemeral=True
+                )
+                return
 
         await interaction.response.defer(ephemeral=True)
         try:
@@ -713,7 +732,7 @@ class TimeOffRequestModal(discord.ui.Modal, title="Request Time Off"):
                     "startDate": start,
                     "endDate": end,
                     "usePto": use_pto_text == "yes",
-                    "ptoHours": str(self.pto_hours).strip(),
+                    "ptoHours": pto_hours_text if use_pto_text == "yes" else None,
                     "reason": str(self.reason).strip()
                 },
                 timeout=10
@@ -721,10 +740,14 @@ class TimeOffRequestModal(discord.ui.Modal, title="Request Time Off"):
             data = response.json() if response.content else {}
             if response.ok:
                 request = data.get("request", {})
-                pto_text = "with PTO" if request.get("use_pto") else "without PTO"
+                if request.get("use_pto"):
+                    pto_text = f"using **{request.get('pto_hours')} PTO hours**"
+                else:
+                    pto_text = "as **unpaid time off**"
+
                 await interaction.followup.send(
                     f"Time-off request **#{request.get('id')}** submitted for "
-                    f"**{request.get('start_date')} through {request.get('end_date')}** {pto_text}.",
+                    f"**{request.get('start_date')} through {request.get('end_date')}**, {pto_text}.",
                     ephemeral=True
                 )
             else:
