@@ -9,6 +9,7 @@ import httpx
 import psycopg
 from psycopg.types.json import Jsonb
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
@@ -103,6 +104,17 @@ def init_db():
             id bigserial primary key, started_at timestamptz not null,
             completed_at timestamptz null, status text not null,
             customers_count integer not null default 0, error text null)""")
+        cur.execute("""create table if not exists rms_bridge_jobs(
+            id bigserial primary key,
+            job_type text not null,
+            status text not null default 'queued',
+            requested_at timestamptz not null default now(),
+            started_at timestamptz null,
+            completed_at timestamptz null,
+            worker_name text null,
+            result_text text null,
+            error_text text null)""")
+        cur.execute("create index if not exists rms_bridge_jobs_status_idx on rms_bridge_jobs(status,requested_at)")
         conn.commit()
 
 class Lightspeed:
@@ -399,6 +411,15 @@ class RmsSnapshotBody(BaseModel):
     customers: list[dict] = []
     transactions: list[dict] = []
 
+class RmsJobCreate(BaseModel):
+    job_type: str
+
+class RmsJobComplete(BaseModel):
+    status: str
+    worker_name: str|None=None
+    result_text: str|None=None
+    error_text: str|None=None
+
 @app.post("/admin/migration/rms-snapshot")
 def rms_snapshot(body:RmsSnapshotBody,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
@@ -464,3 +485,117 @@ def staging_status(x_admin_key:str|None=Header(default=None)):
         maps=cur.fetchone()[0]
     return {"customers_staged":customers,"transactions_staged":transactions,
             "mapped_transactions":mapped_transactions,"customer_maps":maps}
+
+
+@app.get("/admin/rms", response_class=HTMLResponse)
+def rms_admin_page():
+    return HTMLResponse("""<!doctype html>
+<html><head><meta charset="utf-8"><title>Hobby Corner RMS Bridge</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 18px;background:#f6f7f9;color:#171717}
+.card{background:white;border:1px solid #ddd;border-radius:12px;padding:18px;margin:14px 0}
+button{padding:10px 14px;margin:4px;border:0;border-radius:8px;background:#1f5eff;color:white;font-weight:600;cursor:pointer}
+button.secondary{background:#555} input{padding:10px;width:min(520px,90%);border:1px solid #bbb;border-radius:8px}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid #eee;font-size:14px}
+pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8px;max-height:320px;overflow:auto}
+.small{color:#666;font-size:13px}.ok{color:#087a35}.bad{color:#b00020}
+</style></head>
+<body>
+<h1>Hobby Corner RMS Bridge</h1>
+<div class="card">
+<p>Enter the Rewards admin key. It is kept only in this browser tab.</p>
+<input id="key" type="password" placeholder="Rewards admin key">
+<button class="secondary" onclick="saveKey()">Use key</button>
+<span id="auth"></span>
+</div>
+<div class="card">
+<h2>Run on RMS server</h2>
+<button onclick="queueJob('snapshot')">Refresh RMS Data</button>
+<button class="secondary" onclick="queueJob('test')">Connection Test</button>
+<button class="secondary" onclick="queueJob('schema')">Schema Check</button>
+<p class="small">The RMS server checks for queued work periodically. No inbound connection to SQL Server is opened.</p>
+</div>
+<div class="card"><h2>Recent jobs</h2><button class="secondary" onclick="loadJobs()">Refresh status</button>
+<div id="jobs"></div></div>
+<script>
+let key=sessionStorage.getItem('rmsAdminKey')||'';
+document.getElementById('key').value=key;
+function saveKey(){key=document.getElementById('key').value.trim();sessionStorage.setItem('rmsAdminKey',key);document.getElementById('auth').textContent=key?' Key loaded':'';loadJobs();}
+async function api(url,opts={}){key=document.getElementById('key').value.trim();opts.headers={...(opts.headers||{}),'x-admin-key':key};let r=await fetch(url,opts);if(!r.ok)throw new Error(await r.text());return r.json();}
+async function queueJob(t){try{let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
+function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
+async function loadJobs(){try{let d=await api('/admin/rms-jobs');let h='<table><tr><th>ID</th><th>Action</th><th>Status</th><th>Requested</th><th>Result</th></tr>';for(let j of d.jobs){let detail=j.error_text||j.result_text||'';h+='<tr><td>'+j.id+'</td><td>'+esc(j.job_type)+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.requested_at)+'</td><td><details><summary>view</summary><pre>'+esc(detail)+'</pre></details></td></tr>'}h+='</table>';document.getElementById('jobs').innerHTML=h;}catch(e){document.getElementById('jobs').innerHTML='<p class="bad">'+esc(e.message)+'</p>'}}
+if(key)loadJobs();
+setInterval(()=>{if(document.getElementById('key').value.trim())loadJobs()},15000);
+</script></body></html>""")
+
+
+@app.post("/admin/rms-jobs")
+def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    job_type=body.job_type.strip().lower()
+    if job_type not in {"snapshot","test","schema"}:
+        raise HTTPException(400,"Unsupported RMS job type")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""select id from rms_bridge_jobs
+            where job_type=%s and status in ('queued','running')
+            order by requested_at desc limit 1""",(job_type,))
+        existing=cur.fetchone()
+        if existing:
+            return {"ok":True,"id":existing[0],"status":"already_pending"}
+        cur.execute("""insert into rms_bridge_jobs(job_type,status)
+            values(%s,'queued') returning id""",(job_type,))
+        job_id=cur.fetchone()[0]
+        conn.commit()
+    return {"ok":True,"id":job_id,"status":"queued"}
+
+
+@app.get("/admin/rms-jobs")
+def list_rms_jobs(x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""select id,job_type,status,requested_at,started_at,completed_at,
+            worker_name,result_text,error_text from rms_bridge_jobs
+            order by requested_at desc limit 30""")
+        rows=cur.fetchall()
+    keys=["id","job_type","status","requested_at","started_at","completed_at",
+          "worker_name","result_text","error_text"]
+    return {"jobs":[dict(zip(keys,r)) for r in rows]}
+
+
+@app.post("/bridge/rms-jobs/claim")
+def claim_rms_job(x_admin_key:str|None=Header(default=None),x_worker_name:str|None=Header(default=None)):
+    admin(x_admin_key)
+    worker=(x_worker_name or "RMS-Server")[:120]
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""select id,job_type from rms_bridge_jobs
+            where status='queued' order by requested_at
+            for update skip locked limit 1""")
+        row=cur.fetchone()
+        if not row:
+            conn.commit()
+            return {"job":None}
+        cur.execute("""update rms_bridge_jobs set status='running',started_at=now(),worker_name=%s
+            where id=%s""",(worker,row[0]))
+        conn.commit()
+    return {"job":{"id":row[0],"job_type":row[1]}}
+
+
+@app.post("/bridge/rms-jobs/{job_id}/complete")
+def complete_rms_job(job_id:int,body:RmsJobComplete,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    status=body.status.strip().lower()
+    if status not in {"success","failed"}:
+        raise HTTPException(400,"Status must be success or failed")
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""update rms_bridge_jobs
+            set status=%s,completed_at=now(),worker_name=coalesce(%s,worker_name),
+                result_text=%s,error_text=%s
+            where id=%s and status='running'""",
+            (status,body.worker_name,(body.result_text or "")[-20000:],
+             (body.error_text or "")[-8000:],job_id))
+        if cur.rowcount != 1:
+            raise HTTPException(409,"Job is not running or does not exist")
+        conn.commit()
+    return {"ok":True,"id":job_id,"status":status}
