@@ -907,8 +907,143 @@ async def send_pending_time_off(interaction):
     )
 
 
-class CreateShiftModal(discord.ui.Modal, title="Create Shift"):
-    employee = discord.ui.TextInput(label="Employee ID or OPEN", placeholder="12 or OPEN", required=True, max_length=20)
+async def announce_open_shift(interaction, shift, role=None):
+    if role is None:
+        return
+
+    mention = role.mention
+    note = shift.get("note")
+    note_text = f"\n{note}" if note else ""
+    message = (
+        f"{mention} **Open shift available**\n"
+        f"📅 {shift.get('shift_date')}\n"
+        f"🕒 {format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))} CT"
+        f"{note_text}\n"
+        "Use **/hc timeclock → Open Shifts** to claim it."
+    )
+
+    try:
+        await interaction.channel.send(
+            message,
+            allowed_mentions=discord.AllowedMentions(roles=True)
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"The shift was created, but I could not post the role notification: {e}",
+            ephemeral=True
+        )
+
+
+class OpenShiftModal(discord.ui.Modal, title="Post Open Shift"):
+    shift_date = discord.ui.TextInput(label="Shift Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
+    start_time = discord.ui.TextInput(label="Start Time — Central", placeholder="9:00 AM", required=True, max_length=10)
+    end_time = discord.ui.TextInput(label="End Time — Central", placeholder="5:00 PM", required=True, max_length=10)
+    note = discord.ui.TextInput(label="Note (optional)", placeholder="Extra hours available", required=False, max_length=300)
+
+    def __init__(self, notification_role=None):
+        super().__init__()
+        self.notification_role = notification_role
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        try:
+            start_24 = parse_hhmm_12(str(self.start_time))
+            end_24 = parse_hhmm_12(str(self.end_time))
+        except ValueError as e:
+            await interaction.response.send_message(str(e), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        response = requests.post(
+            f"{TIMECLOCK_API_URL}/api/timeclock/admin/shifts",
+            headers=timeclock_headers(),
+            json={
+                "employeeId": None,
+                "shiftDate": str(self.shift_date).strip(),
+                "startTime": start_24,
+                "endTime": end_24,
+                "open": True,
+                "note": str(self.note).strip(),
+                "notificationRoleId": str(self.notification_role.id) if self.notification_role else None,
+                "actor": str(interaction.user)
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+
+        if response.ok:
+            shift = data.get("shift", {})
+            notify_text = (
+                f" and notified **{self.notification_role.name}**"
+                if self.notification_role else ""
+            )
+            await interaction.followup.send(
+                f"Posted **open shift #{shift.get('id')}** for {shift.get('shift_date')} "
+                f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))} CT"
+                f"{notify_text}.",
+                ephemeral=True
+            )
+            await announce_open_shift(interaction, shift, self.notification_role)
+        else:
+            await interaction.followup.send(
+                f"Could not create shift: {data.get('error', response.text)}",
+                ephemeral=True
+            )
+
+
+class ShiftNotifyRoleSelect(discord.ui.RoleSelect):
+    def __init__(self):
+        super().__init__(
+            placeholder="Choose a role to notify",
+            min_values=1,
+            max_values=1
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+        role = self.values[0]
+        await interaction.response.send_modal(OpenShiftModal(notification_role=role))
+
+
+class OpenShiftNotifyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+        self.add_item(ShiftNotifyRoleSelect())
+
+    @discord.ui.button(label="No Notification", style=discord.ButtonStyle.secondary, row=1)
+    async def no_notification(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(OpenShiftModal())
+
+
+class ShiftCreateModeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="Assigned Shift", style=discord.ButtonStyle.secondary, emoji="👤")
+    async def assigned_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_modal(CreateShiftModal())
+
+    @discord.ui.button(label="Open / Extra Hours", style=discord.ButtonStyle.success, emoji="📣")
+    async def open_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await require_timeclock_admin(interaction):
+            return
+        await interaction.response.send_message(
+            "Choose a Discord role to notify, or post the open shift without a notification.",
+            view=OpenShiftNotifyView(),
+            ephemeral=True
+        )
+
+
+class CreateShiftModal(discord.ui.Modal, title="Create Assigned Shift"):
+    employee = discord.ui.TextInput(label="Employee ID", placeholder="12", required=True, max_length=20)
     shift_date = discord.ui.TextInput(label="Shift Date", placeholder="YYYY-MM-DD", required=True, max_length=10)
     start_time = discord.ui.TextInput(label="Start Time — Central", placeholder="9:00 AM", required=True, max_length=10)
     end_time = discord.ui.TextInput(label="End Time — Central", placeholder="5:00 PM", required=True, max_length=10)
@@ -923,9 +1058,8 @@ class CreateShiftModal(discord.ui.Modal, title="Create Shift"):
             await interaction.response.send_message(str(e), ephemeral=True)
             return
 
-        open_shift = employee_value.upper() == "OPEN"
-        if not open_shift and not employee_value.isdigit():
-            await interaction.response.send_message("Employee must be an Employee ID or OPEN.", ephemeral=True)
+        if not employee_value.isdigit():
+            await interaction.response.send_message("Employee ID must be a number.", ephemeral=True)
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -933,11 +1067,11 @@ class CreateShiftModal(discord.ui.Modal, title="Create Shift"):
             f"{TIMECLOCK_API_URL}/api/timeclock/admin/shifts",
             headers=timeclock_headers(),
             json={
-                "employeeId": None if open_shift else employee_value,
+                "employeeId": employee_value,
                 "shiftDate": str(self.shift_date).strip(),
                 "startTime": start_24,
                 "endTime": end_24,
-                "open": open_shift,
+                "open": False,
                 "note": str(self.note).strip(),
                 "actor": str(interaction.user)
             },
@@ -947,7 +1081,7 @@ class CreateShiftModal(discord.ui.Modal, title="Create Shift"):
         if response.ok:
             shift = data.get("shift", {})
             await interaction.followup.send(
-                f"Created **{'open' if open_shift else 'assigned'} shift #{shift.get('id')}** "
+                f"Created **assigned shift #{shift.get('id')}** "
                 f"for {shift.get('shift_date')} "
                 f"{format_local_time(shift.get('start_time'))}–{format_local_time(shift.get('end_time'))}.",
                 ephemeral=True
@@ -1067,32 +1201,24 @@ class StoreHoursModal(discord.ui.Modal, title="Set Store Hours"):
             await interaction.followup.send(f"Could not save store hours: {data.get('error', response.text)}", ephemeral=True)
 
 
-class PtoEligibilityModal(discord.ui.Modal, title="Set PTO Eligibility"):
-    employee_id = discord.ui.TextInput(label="Employee ID", required=True, max_length=20)
-    eligible = discord.ui.TextInput(label="PTO Eligible? yes/no", placeholder="yes", required=True, max_length=3)
+class PtoEligibilityChoiceView(discord.ui.View):
+    def __init__(self, employee):
+        super().__init__(timeout=120)
+        self.employee = employee
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def set_eligibility(self, interaction, eligible):
         if not await require_timeclock_admin(interaction):
             return
 
-        employee_id = str(self.employee_id).strip()
-        eligible_text = str(self.eligible).strip().lower()
-
-        if not employee_id.isdigit():
-            await interaction.response.send_message("Employee ID must be a number.", ephemeral=True)
-            return
-        if eligible_text not in ("yes", "no"):
-            await interaction.response.send_message("PTO Eligible must be yes or no.", ephemeral=True)
-            return
-
         await interaction.response.defer(ephemeral=True)
+        employee_id = str(self.employee.get("id"))
 
         try:
             response = requests.post(
                 f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees/{employee_id}/pto-eligibility",
                 headers=timeclock_headers(),
                 json={
-                    "eligible": eligible_text == "yes",
+                    "eligible": eligible,
                     "actor": str(interaction.user)
                 },
                 timeout=10
@@ -1112,6 +1238,91 @@ class PtoEligibilityModal(discord.ui.Modal, title="Set PTO Eligibility"):
                 )
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+
+    @discord.ui.button(label="PTO Eligible", style=discord.ButtonStyle.success, emoji="✅")
+    async def eligible_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_eligibility(interaction, True)
+
+    @discord.ui.button(label="Not Eligible", style=discord.ButtonStyle.secondary, emoji="🚫")
+    async def not_eligible_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.set_eligibility(interaction, False)
+
+
+class PtoEmployeeSelect(discord.ui.Select):
+    def __init__(self, employees):
+        self.employee_map = {str(employee.get("id")): employee for employee in employees}
+        options = []
+        for employee in employees:
+            status = "PTO eligible" if employee.get("pto_eligible") else "Not PTO eligible"
+            options.append(
+                discord.SelectOption(
+                    label=str(employee.get("name") or f"Employee {employee.get('id')}")[:100],
+                    value=str(employee.get("id")),
+                    description=f"Employee ID {employee.get('id')} • {status}"[:100]
+                )
+            )
+
+        super().__init__(
+            placeholder="Choose an employee",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not await require_timeclock_admin(interaction):
+            return
+
+        employee = self.employee_map.get(self.values[0])
+        if not employee:
+            await interaction.response.send_message("Employee not found.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"**{employee.get('name')}** is currently "
+            f"**{'PTO eligible' if employee.get('pto_eligible') else 'not PTO eligible'}**.\n"
+            "Choose the new setting:",
+            view=PtoEligibilityChoiceView(employee),
+            ephemeral=True
+        )
+
+
+class PtoEmployeeSelectView(discord.ui.View):
+    def __init__(self, employees):
+        super().__init__(timeout=180)
+        self.add_item(PtoEmployeeSelect(employees))
+
+
+async def send_pto_employee_picker(interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees",
+        headers=timeclock_headers(),
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+
+    if not response.ok:
+        await interaction.followup.send(
+            f"Could not load employees: {data.get('error', response.text)}",
+            ephemeral=True
+        )
+        return
+
+    employees = data.get("employees", [])
+    if not employees:
+        await interaction.followup.send("No employees are available.", ephemeral=True)
+        return
+
+    chunks = [employees[i:i + 25] for i in range(0, len(employees), 25)]
+    for index, chunk in enumerate(chunks, start=1):
+        label = "Choose an employee to change PTO eligibility."
+        if len(chunks) > 1:
+            label += f" Page {index}/{len(chunks)}."
+        await interaction.followup.send(
+            label,
+            view=PtoEmployeeSelectView(chunk),
+            ephemeral=True
+        )
 
 
 class TimeclockControlPanel(discord.ui.View):
@@ -1205,7 +1416,11 @@ class TimeclockControlPanel(discord.ui.View):
     async def create_shift(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_modal(CreateShiftModal())
+        await interaction.response.send_message(
+            "Create an assigned shift, or post open/additional hours for staff to claim.",
+            view=ShiftCreateModeView(),
+            ephemeral=True
+        )
 
     @discord.ui.button(label="Store Hours", style=discord.ButtonStyle.secondary, emoji="🏪", row=3)
     async def store_hours(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1217,7 +1432,11 @@ class TimeclockControlPanel(discord.ui.View):
     async def pto_eligibility(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_modal(PtoEligibilityModal())
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_pto_employee_picker(interaction)
+        except Exception as e:
+            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
 
 
