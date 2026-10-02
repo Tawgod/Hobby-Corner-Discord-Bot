@@ -1,7 +1,9 @@
 param(
-  [ValidateSet("test","schema","product-schema","customers-preview","snapshot")]
+  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count","customers-preview","snapshot")]
   [string]$Action = "test",
-  [string]$ConfigPath = "$PSScriptRoot\config.json"
+  [string]$ConfigPath = "$PSScriptRoot\config.json",
+  [string]$TableName = "",
+  [int]$PreviewRows = 25
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,6 +51,18 @@ function Invoke-SqlRows([string]$Query) {
   } finally {
     if ($conn.State -ne "Closed") { $conn.Close() }
   }
+}
+
+function Resolve-SafeTableName([string]$RequestedTable) {
+  $name = [string]$RequestedTable
+  if ([string]::IsNullOrWhiteSpace($name)) { throw "TableName is required." }
+  $escaped = $name.Replace("'", "''")
+  $rows = @(Invoke-SqlRows "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$escaped';")
+  if ($rows.Count -eq 0) { throw "Unknown RMS table or view: $name" }
+  if ($rows.Count -gt 1) { throw "Table name is ambiguous across schemas: $name" }
+  $schema = [string]$rows[0].TABLE_SCHEMA
+  $table = [string]$rows[0].TABLE_NAME
+  return "[" + $schema.Replace("]", "]]") + "].[" + $table.Replace("]", "]]") + "]"
 }
 
 function Invoke-BridgePost([hashtable]$Body) {
@@ -173,6 +187,78 @@ ORDER BY TABLE_NAME, ORDINAL_POSITION;
     $rows = @(Invoke-SqlRows $q)
     Write-Host "Product/inventory schema candidates: $($rows.Count)" -ForegroundColor Green
     $rows | Format-Table -AutoSize
+  }
+
+  "database-schema" {
+    $q = @"
+SELECT
+    T.TABLE_SCHEMA,
+    T.TABLE_NAME,
+    T.TABLE_TYPE,
+    C.ORDINAL_POSITION,
+    C.COLUMN_NAME,
+    C.DATA_TYPE,
+    C.CHARACTER_MAXIMUM_LENGTH,
+    C.NUMERIC_PRECISION,
+    C.NUMERIC_SCALE,
+    C.IS_NULLABLE
+FROM INFORMATION_SCHEMA.TABLES T
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
+  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
+ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
+"@
+    $rows=@(Invoke-SqlRows $q)
+    Write-Host "Database schema rows: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
+  }
+
+  "database-tables" {
+    $q = @"
+SELECT
+    TABLE_SCHEMA,
+    TABLE_NAME,
+    TABLE_TYPE
+FROM INFORMATION_SCHEMA.TABLES
+ORDER BY TABLE_SCHEMA,TABLE_NAME;
+"@
+    $rows=@(Invoke-SqlRows $q)
+    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
+  }
+
+  "database-relations" {
+    $q = @"
+SELECT
+    fk.name AS ForeignKeyName,
+    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
+    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
+    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
+    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
+    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
+    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
+FROM sys.foreign_keys fk
+JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
+ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
+"@
+    $rows=@(Invoke-SqlRows $q)
+    Write-Host "Foreign-key relationships found: $($rows.Count)" -ForegroundColor Green
+    if ($rows.Count -eq 0) { Write-Host "No declared foreign keys were found. RMS may rely on implicit relationships." }
+    else { $rows | Format-Table -AutoSize }
+  }
+
+  "table-count" {
+    $safeTable=Resolve-SafeTableName $TableName
+    $rows=Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safeTable;"
+    Write-Host "Table: $TableName" -ForegroundColor Green
+    $rows | Format-List
+  }
+
+  "table-preview" {
+    if ($PreviewRows -lt 1) { $PreviewRows=25 }
+    if ($PreviewRows -gt 100) { $PreviewRows=100 }
+    $safeTable=Resolve-SafeTableName $TableName
+    Write-Host "Previewing TOP $PreviewRows rows from $TableName" -ForegroundColor Green
+    Invoke-SqlRows "SELECT TOP $PreviewRows * FROM $safeTable;" | Format-Table -AutoSize
   }
 
   "customers-preview" {
