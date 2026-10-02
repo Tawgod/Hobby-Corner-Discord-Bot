@@ -29,12 +29,18 @@ if ($null -eq $claim.job) {
 
 $jobId = [int]$claim.job.id
 $action = [string]$claim.job.job_type
+$args = $claim.job.args
+$tableName = if ($args -and $args.table_name) { [string]$args.table_name } else { "" }
+$previewRows = if ($args -and $args.preview_rows) { [int]$args.preview_rows } else { 25 }
 $resultText = ""
 $errorText = ""
 $status = "success"
 
 try {
-  $resultText = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bridgePath -Action $action 2>&1 | Out-String)
+  $bridgeArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$bridgePath,"-Action",$action)
+  if ($tableName) { $bridgeArgs += @("-TableName",$tableName) }
+  if ($action -eq "table-preview") { $bridgeArgs += @("-PreviewRows",[string]$previewRows) }
+  $resultText = (& powershell.exe @bridgeArgs 2>&1 | Out-String)
   if ($LASTEXITCODE -ne 0) {
     $status = "failed"
     $errorText = $resultText
