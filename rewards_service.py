@@ -127,6 +127,7 @@ def init_db():
             worker_name text null,
             result_text text null,
             error_text text null)""")
+        cur.execute("alter table rms_bridge_jobs add column if not exists args jsonb null")
         cur.execute("create index if not exists rms_bridge_jobs_status_idx on rms_bridge_jobs(status,requested_at)")
         conn.commit()
 
@@ -429,6 +430,8 @@ class DiscordCustomerSyncBody(BaseModel):
 
 class RmsJobCreate(BaseModel):
     job_type: str
+    table_name: str|None=None
+    preview_rows: int|None=25
 
 class RmsJobComplete(BaseModel):
     status: str
@@ -531,7 +534,18 @@ pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8
 <button class="secondary" onclick="queueJob('test')">Connection Test</button>
 <button class="secondary" onclick="queueJob('schema')">Customer Schema Check</button>
 <button class="secondary" onclick="queueJob('product-schema')">Product / Inventory Schema Scan</button>
+<button class="secondary" onclick="queueJob('database-tables')">List All Tables / Views</button>
+<button class="secondary" onclick="queueJob('database-schema')">Full Database Schema</button>
+<button class="secondary" onclick="queueJob('database-relations')">Relationship Scan</button>
 <p class="small">The RMS server checks for queued work periodically. No inbound connection to SQL Server is opened.</p>
+</div>
+<div class="card">
+<h2>Read-only database explorer</h2>
+<p class="small">Enter an exact table/view name returned by “List All Tables / Views”. The bridge validates it against RMS metadata. Arbitrary SQL is not accepted.</p>
+<input id="tableName" placeholder="Table or view name">
+<input id="previewRows" type="number" min="1" max="100" value="25" style="width:100px">
+<button class="secondary" onclick="queueTableJob('table-count')">Count Rows</button>
+<button class="secondary" onclick="queueTableJob('table-preview')">Preview Table</button>
 </div>
 <div class="card"><h2>Recent jobs</h2><button class="secondary" onclick="loadJobs()">Refresh status</button>
 <div id="jobs"></div></div>
@@ -541,6 +555,7 @@ document.getElementById('key').value=key;
 function saveKey(){key=document.getElementById('key').value.trim();sessionStorage.setItem('rmsAdminKey',key);document.getElementById('auth').textContent=key?' Key loaded':'';loadJobs();}
 async function api(url,opts={}){key=document.getElementById('key').value.trim();opts.headers={...(opts.headers||{}),'x-admin-key':key};let r=await fetch(url,opts);if(!r.ok)throw new Error(await r.text());return r.json();}
 async function queueJob(t){try{let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
+async function queueTableJob(t){try{let table=document.getElementById('tableName').value.trim();let rows=parseInt(document.getElementById('previewRows').value||'25',10);if(!table)throw new Error('Enter an exact table/view name first.');let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t,table_name:table,preview_rows:rows})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 async function loadJobs(){try{let d=await api('/admin/rms-jobs');let h='<table><tr><th>ID</th><th>Action</th><th>Status</th><th>Requested</th><th>Result</th></tr>';for(let j of d.jobs){let detail=j.error_text||j.result_text||'';h+='<tr><td>'+j.id+'</td><td>'+esc(j.job_type)+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.requested_at)+'</td><td><details><summary>view</summary><pre>'+esc(detail)+'</pre></details></td></tr>'}h+='</table>';document.getElementById('jobs').innerHTML=h;}catch(e){document.getElementById('jobs').innerHTML='<p class="bad">'+esc(e.message)+'</p>'}}
 if(key)loadJobs();
@@ -552,8 +567,22 @@ setInterval(()=>{if(document.getElementById('key').value.trim())loadJobs()},1500
 def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     job_type=body.job_type.strip().lower()
-    if job_type not in {"snapshot","test","schema","product-schema"}:
+    supported={"snapshot","test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count"}
+    if job_type not in supported:
         raise HTTPException(400,"Unsupported RMS job type")
+    args={}
+    if job_type in {"table-preview","table-count"}:
+        table_name=(body.table_name or "").strip()
+        if not table_name or len(table_name)>128:
+            raise HTTPException(400,"A valid table_name is required")
+        if not all(ch.isalnum() or ch in "_$#@ " for ch in table_name):
+            raise HTTPException(400,"Unsupported characters in table_name")
+        args["table_name"]=table_name
+    if job_type=="table-preview":
+        rows=int(body.preview_rows or 25)
+        if rows<1 or rows>100:
+            raise HTTPException(400,"preview_rows must be between 1 and 100")
+        args["preview_rows"]=rows
     with db() as conn, conn.cursor() as cur:
         cur.execute("""select id from rms_bridge_jobs
             where job_type=%s and status in ('queued','running')
@@ -561,8 +590,8 @@ def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
         existing=cur.fetchone()
         if existing:
             return {"ok":True,"id":existing[0],"status":"already_pending"}
-        cur.execute("""insert into rms_bridge_jobs(job_type,status)
-            values(%s,'queued') returning id""",(job_type,))
+        cur.execute("""insert into rms_bridge_jobs(job_type,status,args)
+            values(%s,'queued',%s) returning id""",(job_type,Jsonb(args) if args else None))
         job_id=cur.fetchone()[0]
         conn.commit()
     return {"ok":True,"id":job_id,"status":"queued"}
@@ -586,7 +615,7 @@ def claim_rms_job(x_admin_key:str|None=Header(default=None),x_worker_name:str|No
     admin(x_admin_key)
     worker=(x_worker_name or "RMS-Server")[:120]
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""select id,job_type from rms_bridge_jobs
+        cur.execute("""select id,job_type,args from rms_bridge_jobs
             where status='queued' order by requested_at
             for update skip locked limit 1""")
         row=cur.fetchone()
@@ -596,7 +625,7 @@ def claim_rms_job(x_admin_key:str|None=Header(default=None),x_worker_name:str|No
         cur.execute("""update rms_bridge_jobs set status='running',started_at=now(),worker_name=%s
             where id=%s""",(worker,row[0]))
         conn.commit()
-    return {"job":{"id":row[0],"job_type":row[1]}}
+    return {"job":{"id":row[0],"job_type":row[1],"args":row[2] or {}}}
 
 
 @app.post("/bridge/rms-jobs/{job_id}/complete")
