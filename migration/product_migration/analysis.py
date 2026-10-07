@@ -69,16 +69,33 @@ def find_category_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[st
 
 
 def find_supplier_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame, str, str]:
+    # Preferred: an explicit RMS/old-supplier -> Lightspeed supplier alias map.
     for name, df in worksheets.items():
         headers = [str(c).strip() for c in df.columns]
         source = next((h for h in SUPPLIER_SOURCE_HEADERS if h in headers), None)
         target = next((h for h in SUPPLIER_TARGET_HEADERS if h in headers), None)
         if source and target and source != target:
             return name, df, source, target
+
+    # Current LS: importer structure: "Supplier ID Map" is the canonical
+    # Lightspeed supplier list with Supplier Name + Supplier UUID. In this
+    # mode RMS supplier names must match a canonical LS supplier name after
+    # normalization; unmatched names are sent to REVIEW rather than guessed.
+    preferred = worksheets.get("Supplier ID Map")
+    if preferred is not None:
+        headers = [str(c).strip() for c in preferred.columns]
+        if "Supplier Name" in headers:
+            return "Supplier ID Map", preferred, "Supplier Name", "Supplier Name"
+
+    for name, df in worksheets.items():
+        headers = [str(c).strip() for c in df.columns]
+        if "Supplier Name" in headers and "Supplier UUID" in headers:
+            return name, df, "Supplier Name", "Supplier Name"
+
     raise ValueError(
-        "Could not find a supplier alias/mapping tab. Expected one source header like "
-        "'RMS Supplier'/'Old Supplier' and one target header like "
-        "'LS Supplier'/'Lightspeed Supplier'."
+        "Could not find a supplier mapping or canonical supplier list. Expected either "
+        "an RMS/old-supplier -> LS supplier map, or a sheet with 'Supplier Name' "
+        "and 'Supplier UUID' (such as 'Supplier ID Map')."
     )
 
 
