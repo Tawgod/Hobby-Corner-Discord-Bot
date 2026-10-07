@@ -100,17 +100,45 @@ def find_supplier_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[st
 
 
 def build_category_map(df: pd.DataFrame) -> dict[tuple[str, str], dict]:
-    ls_cols = [c for c in df.columns if str(c).strip().startswith(CATEGORY_LS_PREFIX)]
+    # Google Sheets can contain duplicate visible headers (for example several
+    # columns all named "LS Level3"). Access by positional index so pandas does
+    # not return a Series for duplicate column names.
+    columns = [str(c).strip() for c in df.columns]
+    try:
+        dept_idx = columns.index("RMS Department")
+        cat_idx = columns.index("RMS Category")
+    except ValueError as exc:
+        raise ValueError(
+            "Category mapping sheet must contain 'RMS Department' and 'RMS Category'."
+        ) from exc
+
+    ls_indexes = [
+        i for i, c in enumerate(columns)
+        if c.startswith(CATEGORY_LS_PREFIX)
+    ]
+
     mapping = {}
-    for _, row in df.iterrows():
-        key = (norm(row.get("RMS Department")), norm(row.get("RMS Category")))
+    for row in df.itertuples(index=False, name=None):
+        dept = row[dept_idx] if dept_idx < len(row) else ""
+        cat = row[cat_idx] if cat_idx < len(row) else ""
+        key = (norm(dept), norm(cat))
         if not any(key):
             continue
-        levels = [str(row.get(c, "")).strip() for c in ls_cols if not pd.isna(row.get(c)) and str(row.get(c)).strip()]
+
+        levels = []
+        for i in ls_indexes:
+            value = row[i] if i < len(row) else ""
+            if pd.isna(value):
+                continue
+            text = str(value).strip()
+            if text:
+                levels.append(text)
+
         mapping[key] = {
             "levels": levels,
             "path": " > ".join(levels),
         }
+
     return mapping
 
 
