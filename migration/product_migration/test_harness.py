@@ -171,7 +171,7 @@ def build_standard_family_payload(
     if retail is not None:
         # Hobby Corner currently uses tax-inclusive retail pricing in the source
         # migration data; this can be flipped centrally if store config requires.
-        product["prices"] = {"price_including_tax": retail}
+        product["prices"] = {"price_excluding_tax": retail}
 
     if supplier_id:
         supplier_entry: Dict[str, Any] = {"supplier_id": supplier_id}
@@ -223,7 +223,7 @@ def build_test_preview(
                 if payload["products"][0].get("suppliers")
                 else ""
             ),
-            "Retail": payload["products"][0].get("prices", {}).get("price_including_tax", ""),
+            "Retail": payload["products"][0].get("prices", {}).get("price_excluding_tax", ""),
             "Supply Cost": (
                 payload["products"][0].get("suppliers", [{}])[0].get("price", "")
                 if payload["products"][0].get("suppliers")
