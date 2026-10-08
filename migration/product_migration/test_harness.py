@@ -370,6 +370,8 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     if not name:
         return None
 
+    wanted = name.casefold()
+
     for root in search_roots:
         root = _text(root)
         if not root or not os.path.isdir(root):
@@ -379,13 +381,16 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
         if os.path.isfile(exact):
             return exact
 
-        wanted = name.casefold()
+        # Images are commonly organized into nested Drive folders such as
+        # Lightspeed Ready/category/vendor. Walk recursively so PictureName
+        # does not depend on a specific folder layout.
         try:
-            for entry in os.listdir(root):
-                if entry.casefold() == wanted:
-                    candidate = os.path.join(root, entry)
-                    if os.path.isfile(candidate):
-                        return candidate
+            for current_root, _, files in os.walk(root):
+                for filename in files:
+                    if filename.casefold() == wanted:
+                        candidate = os.path.join(current_root, filename)
+                        if os.path.isfile(candidate):
+                            return candidate
         except OSError:
             continue
 
@@ -469,13 +474,27 @@ def execute_controlled_product_write(
         )
         dup.raise_for_status()
         body = dup.json()
+        raw_data = body.get("data")
+
+        # Lightspeed's 2.0 response can be either a list of products or an
+        # object containing a products list depending on the query/result.
+        if isinstance(raw_data, list):
+            candidates = raw_data
+        elif isinstance(raw_data, dict):
+            nested = raw_data.get("products")
+            candidates = nested if isinstance(nested, list) else [raw_data]
+        else:
+            candidates = []
+
         matches = [
-            item for item in (body.get("data") or [])
-            if _text(item.get("sku")) == sku
+            item for item in candidates
+            if isinstance(item, dict) and _text(item.get("sku")) == sku
         ]
         if matches:
+            existing = matches[0]
             result["Status"] = "SKIPPED_EXISTING"
-            result["Product ID"] = _text(matches[0].get("id"))
+            result["Product ID"] = _text(existing.get("id"))
+            result["Family ID"] = _text(existing.get("family_id"))
             return result
 
         created = requests.post(
