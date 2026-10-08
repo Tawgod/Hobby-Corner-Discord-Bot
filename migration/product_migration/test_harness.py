@@ -208,7 +208,7 @@ def build_standard_family_payload(
         supplier_entry: Dict[str, Any] = {"supplier_id": supplier_id}
         if cost is not None:
             supplier_entry["price"] = cost
-        supplier_code = _text(_first_existing(row, ["supplier_code", "SupplierCode", "ReorderNumber"]))
+        supplier_code = _text(_first_existing(row, ["RMS_SupplierCode", "supplier_code", "SupplierCode", "ReorderNumber"]))
         if supplier_code:
             supplier_entry["code"] = supplier_code
         product["suppliers"] = [supplier_entry]
