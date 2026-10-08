@@ -333,3 +333,269 @@ def build_test_preview(
         })
 
     return pd.DataFrame(preview_rows), payloads
+
+
+def payload_contains_opening_inventory(payload: Dict[str, Any]) -> bool:
+    """Return True if any nested payload key could write outlet inventory."""
+    def walk(value: Any) -> bool:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if str(key).strip().casefold() in {
+                    "outlet_inventories",
+                    "outlet_inventory",
+                    "inventory",
+                    "inventory_level",
+                    "on_hand",
+                }:
+                    return True
+                if walk(child):
+                    return True
+        elif isinstance(value, list):
+            return any(walk(child) for child in value)
+        return False
+
+    return walk(payload)
+
+
+def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optional[str]:
+    """
+    Resolve PictureName against one or more local/Drive folders.
+
+    Exact filename wins. A case-insensitive filename match is allowed so RMS
+    names like .JPG still resolve on case-sensitive Colab mounts.
+    """
+    import os
+
+    name = _text(picture_name)
+    if not name:
+        return None
+
+    for root in search_roots:
+        root = _text(root)
+        if not root or not os.path.isdir(root):
+            continue
+
+        exact = os.path.join(root, name)
+        if os.path.isfile(exact):
+            return exact
+
+        wanted = name.casefold()
+        try:
+            for entry in os.listdir(root):
+                if entry.casefold() == wanted:
+                    candidate = os.path.join(root, entry)
+                    if os.path.isfile(candidate):
+                        return candidate
+        except OSError:
+            continue
+
+    return None
+
+
+def execute_controlled_product_write(
+    payload: Dict[str, Any],
+    *,
+    api_domain: str,
+    token: str,
+    picture_path: Optional[str] = None,
+    timeout: int = 45,
+) -> Dict[str, Any]:
+    """
+    Create one STANDARD product family, upload one image if supplied, and read it back.
+
+    Safety rules:
+      - exact SKU duplicate gate runs first
+      - payloads containing outlet/on-hand inventory keys are rejected
+      - image upload happens only after successful product creation
+      - no reorder/restock write is attempted here
+    """
+    import os
+    import requests
+
+    if payload_contains_opening_inventory(payload):
+        raise ValueError("Blocked write: payload contains an inventory/on-hand field.")
+
+    products = payload.get("products") or []
+    if len(products) != 1:
+        raise ValueError("Controlled writer currently requires exactly one product per family.")
+
+    codes = products[0].get("codes") or []
+    sku = next(
+        (
+            _text(code.get("code"))
+            for code in codes
+            if _text(code.get("type")).upper() == "CUSTOM" and _text(code.get("code"))
+        ),
+        "",
+    )
+    if not sku:
+        raise ValueError("Controlled writer could not resolve the product SKU.")
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    result: Dict[str, Any] = {
+        "SKU": sku,
+        "Status": "PENDING",
+        "Family ID": "",
+        "Product ID": "",
+        "Description Verified": False,
+        "Image Requested": bool(picture_path),
+        "Image Uploaded": False,
+        "Image Verified": False,
+        "Error": "",
+    }
+
+    try:
+        # Duplicate gate uses the mature 2.0 product search endpoint.
+        dup = requests.get(
+            f"{base_host}/api/2.0/products",
+            params={"sku": sku, "page_size": 50},
+            headers=headers,
+            timeout=timeout,
+        )
+        dup.raise_for_status()
+        body = dup.json()
+        matches = [
+            item for item in (body.get("data") or [])
+            if _text(item.get("sku")) == sku
+        ]
+        if matches:
+            result["Status"] = "SKIPPED_EXISTING"
+            result["Product ID"] = _text(matches[0].get("id"))
+            return result
+
+        created = requests.post(
+            f"{base_host}/api/2026-10/product_families",
+            json=payload,
+            headers={**headers, "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        if not created.ok:
+            raise RuntimeError(f"Create failed {created.status_code}: {created.text[:1000]}")
+
+        create_body = created.json().get("data") or created.json()
+        family_id = _text(
+            create_body.get("product_family_id")
+            or create_body.get("family_id")
+            or create_body.get("id")
+        )
+        product_ids = create_body.get("product_ids") or []
+        product_id = _text(product_ids[0] if product_ids else "")
+
+        if not family_id or not product_id:
+            raise RuntimeError(f"Create succeeded but IDs were missing: {create_body}")
+
+        result["Family ID"] = family_id
+        result["Product ID"] = product_id
+
+        if picture_path:
+            if not os.path.isfile(picture_path):
+                raise FileNotFoundError(f"Picture not found: {picture_path}")
+
+            with open(picture_path, "rb") as fh:
+                upload = requests.post(
+                    f"{base_host}/api/2026-10/products/{product_id}/images",
+                    headers=headers,
+                    files={"image": (os.path.basename(picture_path), fh)},
+                    timeout=timeout,
+                )
+            if not upload.ok:
+                raise RuntimeError(f"Image upload failed {upload.status_code}: {upload.text[:1000]}")
+            result["Image Uploaded"] = True
+
+        family_read = requests.get(
+            f"{base_host}/api/2026-10/product_families/{family_id}",
+            headers=headers,
+            timeout=timeout,
+        )
+        if not family_read.ok:
+            raise RuntimeError(
+                f"Family verify failed {family_read.status_code}: {family_read.text[:1000]}"
+            )
+
+        family_data = family_read.json().get("data") or {}
+        expected_description = _text(payload.get("description"))
+        actual_description = _text(family_data.get("description"))
+        result["Description Verified"] = (
+            not expected_description or actual_description == expected_description
+        )
+
+        verified_products = family_data.get("products") or []
+        verified_product = next(
+            (p for p in verified_products if _text(p.get("id")) == product_id),
+            {},
+        )
+        images = verified_product.get("images") or []
+        result["Image Verified"] = bool(images) if picture_path else False
+
+        result["Status"] = "CREATED"
+        if expected_description and not result["Description Verified"]:
+            result["Status"] = "ERROR"
+            result["Error"] = "Description did not match on read-back."
+        if picture_path and not result["Image Verified"]:
+            result["Status"] = "ERROR"
+            result["Error"] = (
+                (result["Error"] + " ").strip()
+                + "Image was not present on read-back."
+            ).strip()
+
+    except Exception as exc:
+        result["Status"] = "ERROR"
+        result["Error"] = str(exc)
+
+    return result
+
+
+def execute_controlled_batch(
+    preview: pd.DataFrame,
+    payloads: List[Dict[str, Any]],
+    *,
+    api_domain: str,
+    token: str,
+    image_search_roots: Iterable[str] = (),
+    max_writes: int = 20,
+) -> pd.DataFrame:
+    """
+    Execute a deliberately small test batch and return one result row per item.
+
+    max_writes is a hard guardrail; raise instead of silently processing more.
+    """
+    if len(payloads) != len(preview):
+        raise ValueError("Preview/payload row counts do not match.")
+    if len(payloads) > max_writes:
+        raise ValueError(
+            f"Controlled test contains {len(payloads)} products; hard limit is {max_writes}."
+        )
+
+    results = []
+    for idx, payload in enumerate(payloads):
+        row = preview.iloc[idx]
+        picture_name = row.get("Picture Source", "")
+        picture_path = find_picture_path(picture_name, image_search_roots)
+        write_result = execute_controlled_product_write(
+            payload,
+            api_domain=api_domain,
+            token=token,
+            picture_path=picture_path,
+        )
+        write_result["Run ID"] = _text(row.get("Run ID"))
+        write_result["Picture Source"] = _text(picture_name)
+        write_result["Picture Found"] = bool(picture_path)
+        write_result["Opening Inventory"] = 0
+        results.append(write_result)
+
+    return pd.DataFrame(results)
