@@ -164,7 +164,16 @@ def build_standard_family_payload(
     brand_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Dict[str, Any]:
-    name = _text(_first_existing(row, ["RMS_Description", "Description"]))
+    # Prefer the richer customer-facing web title used by the legacy importer.
+    # RMS Description has a much shorter historical character limit and is only
+    # a fallback when no web description/title is available.
+    name = _text(_first_existing(row, [
+        "Web Description",
+        "RMS_WebDescription",
+        "WebDescription",
+        "RMS_Description",
+        "Description",
+    ]))
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
@@ -290,6 +299,11 @@ def build_test_preview(
         measurements = product.get("measurements", {})
         picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
         brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
+        name_source = ""
+        for candidate in ["Web Description", "RMS_WebDescription", "WebDescription", "RMS_Description", "Description"]:
+            if _text(row.get(candidate)):
+                name_source = candidate
+                break
         missing_rich_fields = []
         if not brand_name: missing_rich_fields.append("brand")
         if not upc_codes: missing_rich_fields.append("UPC")
@@ -302,6 +316,7 @@ def build_test_preview(
             "RMS Item ID": _text(row.get("RMS_ItemID")),
             "SKU": _text(row.get("RMS_SKU")),
             "Name": payload["name"],
+            "Name Source": name_source,
             "LS Category Path": _text(row.get("LS_Category_Path")),
             "Category UUID": payload.get("category_id", ""),
             "Brand": brand_name,
