@@ -154,7 +154,7 @@ def build_standard_family_payload(
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
-    brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand"]))
+    brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
     upc = _text(_first_existing(row, ["UPC", "RMS_UPC", "Barcode", "barcode"]))
     picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
     weight = _decimal_string(_first_existing(row, ["Weight", "RMS_Weight", "weight"]))
