@@ -1,9 +1,10 @@
 param(
-  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count","customers-preview","snapshot")]
+  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count","customers-preview","product-export","snapshot")]
   [string]$Action = "test",
   [string]$ConfigPath = "$PSScriptRoot\config.json",
   [string]$TableName = "",
-  [int]$PreviewRows = 25
+  [int]$PreviewRows = 25,
+  [string]$ProductExportPath = "$PSScriptRoot\exports\HCDB Test Items.csv"
 )
 
 $ErrorActionPreference = "Stop"
@@ -102,6 +103,90 @@ SELECT
     C.LastUpdated
 FROM Customer C
 ORDER BY C.ID;
+"@
+
+$productExportQuery = @"
+SELECT
+    I.ID                                      AS RMS_ItemID,
+    I.ItemLookupCode                          AS RMS_SKU,
+    I.Description                             AS RMS_Description,
+    I.DepartmentID                            AS RMS_DepartmentID,
+    D.Name                                    AS RMS_Department,
+    D.Code                                    AS RMS_DepartmentCode,
+    I.CategoryID                              AS RMS_CategoryID,
+    C.Name                                    AS RMS_Category,
+    C.Code                                    AS RMS_CategoryCode,
+    I.SupplierID                              AS RMS_SupplierID,
+    S.SupplierName                            AS RMS_Supplier,
+    S.Code                                    AS RMS_SupplierCode,
+    PSL.ReorderNumber                         AS RMS_SupplierItemCode,
+    PSL.Cost                                  AS RMS_SupplierListCost,
+    I.Cost,
+    I.LastCost,
+    I.ReplacementCost,
+    I.Price                                   AS RetailPrice,
+    I.MSRP,
+    I.Quantity                                AS RMS_Quantity,
+    I.ReorderPoint                            AS RMS_ReorderPoint,
+    I.RestockLevel                            AS RMS_RestockLevel,
+    I.LastSold,
+    I.LastReceived,
+    I.DateCreated,
+    I.LastUpdated,
+    I.Inactive,
+    I.DoNotOrder,
+    I.ExtendedDescription,
+    I.SubDescription1,
+    I.SubDescription2,
+    I.SubDescription3                         AS Brand,
+    I.SubDescription3,
+    I.PictureName,
+    I.Weight,
+    BAR.PrimaryBarcode                        AS RMS_UPC,
+    ALS.AllAliases                            AS RMS_Aliases
+FROM Item I
+LEFT JOIN Department D ON D.ID = I.DepartmentID
+LEFT JOIN Category C ON C.ID = I.CategoryID
+LEFT JOIN Supplier S ON S.ID = I.SupplierID
+OUTER APPLY (
+    SELECT TOP 1
+        SL.ReorderNumber,
+        SL.Cost
+    FROM SupplierList SL
+    WHERE SL.ItemID = I.ID
+      AND SL.SupplierID = I.SupplierID
+    ORDER BY SL.ID
+) PSL
+OUTER APPLY (
+    SELECT TOP 1 A.Alias AS PrimaryBarcode
+    FROM Alias A
+    WHERE A.ItemID = I.ID
+      AND A.Alias IS NOT NULL
+      AND LTRIM(RTRIM(A.Alias)) <> ''
+      AND A.Alias NOT LIKE '%[^0-9]%'
+      AND LEN(LTRIM(RTRIM(A.Alias))) IN (8, 12, 13, 14)
+    ORDER BY
+      CASE LEN(LTRIM(RTRIM(A.Alias)))
+        WHEN 12 THEN 1
+        WHEN 13 THEN 2
+        WHEN 14 THEN 3
+        WHEN 8 THEN 4
+        ELSE 9
+      END,
+      A.ID
+) BAR
+OUTER APPLY (
+    SELECT STUFF((
+        SELECT '|' + REPLACE(LTRIM(RTRIM(A2.Alias)), '|', '')
+        FROM Alias A2
+        WHERE A2.ItemID = I.ID
+          AND A2.Alias IS NOT NULL
+          AND LTRIM(RTRIM(A2.Alias)) <> ''
+        ORDER BY A2.ID
+        FOR XML PATH(''), TYPE
+    ).value('.', 'nvarchar(max)'), 1, 1, '') AS AllAliases
+) ALS
+ORDER BY I.ID;
 "@
 
 $transactionQuery = @"
@@ -259,6 +344,27 @@ ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
     $safeTable=Resolve-SafeTableName $TableName
     Write-Host "Previewing TOP $PreviewRows rows from $TableName" -ForegroundColor Green
     Invoke-SqlRows "SELECT TOP $PreviewRows * FROM $safeTable;" | Format-Table -AutoSize
+  }
+
+  "product-export" {
+    $exportDir = Split-Path -Parent $ProductExportPath
+    if (-not (Test-Path $exportDir)) {
+      New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
+    }
+
+    Write-Host "Reading enriched RMS product catalog..." -ForegroundColor Cyan
+    $rows = @(Invoke-SqlRows $productExportQuery)
+    Write-Host "Products read: $($rows.Count)" -ForegroundColor Green
+
+    $rows | Export-Csv -Path $ProductExportPath -NoTypeInformation -Encoding UTF8
+    $file = Get-Item $ProductExportPath
+    Write-Host "Product export complete." -ForegroundColor Green
+    Write-Host "Path: $($file.FullName)"
+    Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
+    Write-Host "Brand source: Item.SubDescription3"
+    Write-Host "UPC/aliases source: Alias"
+    Write-Host "Supplier item code source: SupplierList.ReorderNumber"
+    Write-Host "Supplier code source: Supplier.Code"
   }
 
   "customers-preview" {
