@@ -397,6 +397,46 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     return None
 
 
+
+def assess_image_quality(
+    picture_path: Optional[str],
+    *,
+    min_width: int = 500,
+    min_height: int = 500,
+) -> Dict[str, Any]:
+    """
+    Inspect a local product image without blocking its use.
+
+    Images below the configurable dimensions are still eligible for upload, but
+    receive the background review flag 'poor_quality_image' so they can be
+    replaced later.
+    """
+    result = {
+        "width": None,
+        "height": None,
+        "low_quality": False,
+        "review_flags": [],
+        "error": "",
+    }
+    if not picture_path:
+        return result
+
+    try:
+        from PIL import Image
+        with Image.open(picture_path) as img:
+            width, height = img.size
+        result["width"] = int(width)
+        result["height"] = int(height)
+        result["low_quality"] = width < min_width or height < min_height
+        if result["low_quality"]:
+            result["review_flags"].append("poor_quality_image")
+    except Exception as exc:
+        # Failure to inspect quality should not prevent using the existing file.
+        result["error"] = str(exc)
+        result["review_flags"].append("image_quality_unverified")
+
+    return result
+
 def execute_controlled_product_write(
     payload: Dict[str, Any],
     *,
@@ -461,6 +501,10 @@ def execute_controlled_product_write(
         "Image Requested": bool(picture_path),
         "Image Uploaded": False,
         "Image Verified": False,
+        "Image Width": "",
+        "Image Height": "",
+        "Image Low Quality": False,
+        "Review Flags": "",
         "Error": "",
     }
 
@@ -524,6 +568,12 @@ def execute_controlled_product_write(
         if picture_path:
             if not os.path.isfile(picture_path):
                 raise FileNotFoundError(f"Picture not found: {picture_path}")
+
+            quality = assess_image_quality(picture_path)
+            result["Image Width"] = quality.get("width") or ""
+            result["Image Height"] = quality.get("height") or ""
+            result["Image Low Quality"] = bool(quality.get("low_quality"))
+            result["Review Flags"] = ",".join(quality.get("review_flags") or [])
 
             with open(picture_path, "rb") as fh:
                 upload = requests.post(
@@ -614,6 +664,11 @@ def execute_controlled_batch(
         write_result["Run ID"] = _text(row.get("Run ID"))
         write_result["Picture Source"] = _text(picture_name)
         write_result["Picture Found"] = bool(picture_path)
+        if not picture_path:
+            existing_flags = [x for x in _text(write_result.get("Review Flags")).split(",") if x]
+            if "missing_image" not in existing_flags:
+                existing_flags.append("missing_image")
+            write_result["Review Flags"] = ",".join(existing_flags)
         write_result["Opening Inventory"] = 0
         results.append(write_result)
 
@@ -666,6 +721,10 @@ def repair_test_batch_images(
             "Picture Found": False,
             "Image Uploaded": False,
             "Image Verified": False,
+            "Image Width": "",
+            "Image Height": "",
+            "Image Low Quality": False,
+            "Review Flags": "",
             "Status": "",
             "Error": "",
         }
@@ -678,11 +737,18 @@ def repair_test_batch_images(
         picture_path = find_picture_path(picture_name, image_search_roots)
         out["Picture Found"] = bool(picture_path)
         if not picture_path:
+            out["Review Flags"] = "missing_image"
             out["Status"] = "MISSING_IMAGE_FILE"
             repaired.append(out)
             continue
 
         try:
+            quality = assess_image_quality(picture_path)
+            out["Image Width"] = quality.get("width") or ""
+            out["Image Height"] = quality.get("height") or ""
+            out["Image Low Quality"] = bool(quality.get("low_quality"))
+            out["Review Flags"] = ",".join(quality.get("review_flags") or [])
+
             before = requests.get(
                 f"{base_host}/api/2026-10/products/{product_id}",
                 headers=headers,
