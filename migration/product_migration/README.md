@@ -14,6 +14,8 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 - Default reorder suppression starts after 12 months without a reliable sale.
 - Games Workshop items receive special review because part numbers may be reused.
 - The pipeline must support dry-run, small test batches, restart/resume, and explicit status logging.
+- Controlled live tests must include description, upload PictureName after creation when available, and verify both on read-back.
+- Controlled live tests must block any payload containing outlet/on-hand inventory fields and enforce a hard batch-size limit.
 - Bulk processing will run in Google Colab Pro; GitHub remains the source of truth.
 
 ## Planned flow
@@ -24,11 +26,12 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 4. Apply migration/reorder review rules.
 5. Resolve Lightspeed supplier/category mappings.
 6. Send unresolved rows to REVIEW.
-7. Run a 5-10 item dry test batch.
-8. Verify created products in Lightspeed.
-9. Delete test products before the real cutover.
-10. Run the full migration with resumable batching.
-11. Perform physical inventory in Lightspeed to establish on-hand quantities.
+7. Run a varied dry test batch.
+8. Run a bounded controlled live batch (currently 12 products, hard cap 20) and verify description/image persistence plus duplicate protection.
+9. Verify created products in Lightspeed.
+10. Delete test products before the real cutover.
+11. Run the full migration with resumable batching.
+12. Perform physical inventory in Lightspeed to establish on-hand quantities.
 
 ## Status values
 
