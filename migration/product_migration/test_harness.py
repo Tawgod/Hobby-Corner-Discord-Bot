@@ -289,7 +289,7 @@ def build_test_preview(
         upc_codes = [x.get("code", "") for x in product.get("codes", []) if x.get("type") == "UPC"]
         measurements = product.get("measurements", {})
         picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
-        brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand"]))
+        brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
         missing_rich_fields = []
         if not brand_name: missing_rich_fields.append("brand")
         if not upc_codes: missing_rich_fields.append("UPC")
