@@ -584,9 +584,15 @@ def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
             raise HTTPException(400,"preview_rows must be between 1 and 100")
         args["preview_rows"]=rows
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""select id from rms_bridge_jobs
-            where job_type=%s and status in ('queued','running')
-            order by requested_at desc limit 1""",(job_type,))
+        if args:
+            cur.execute("""select id from rms_bridge_jobs
+                where job_type=%s and status in ('queued','running')
+                  and coalesce(args,'{}'::jsonb)=%s
+                order by requested_at desc limit 1""",(job_type,Jsonb(args)))
+        else:
+            cur.execute("""select id from rms_bridge_jobs
+                where job_type=%s and status in ('queued','running')
+                order by requested_at desc limit 1""",(job_type,))
         existing=cur.fetchone()
         if existing:
             return {"ok":True,"id":existing[0],"status":"already_pending"}
