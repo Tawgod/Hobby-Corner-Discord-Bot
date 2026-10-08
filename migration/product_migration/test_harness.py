@@ -32,6 +32,20 @@ def _decimal_string(value: Any) -> Optional[str]:
     return f"{dec:.2f}"
 
 
+def _split_aliases(value: Any) -> List[str]:
+    raw = _text(value)
+    if not raw:
+        return []
+    parts = [p.strip() for p in raw.split('|') if p and p.strip()]
+    seen = set()
+    out = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            out.append(p)
+    return out
+
+
 def _first_existing(row: pd.Series, names: Iterable[str]) -> Any:
     for name in names:
         if name in row.index:
@@ -155,7 +169,8 @@ def build_standard_family_payload(
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
     brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
-    upc = _text(_first_existing(row, ["UPC", "RMS_UPC", "Barcode", "barcode"]))
+    upc = _text(_first_existing(row, ["RMS_UPC", "UPC", "Barcode", "barcode"]))
+    aliases = _split_aliases(_first_existing(row, ["RMS_Aliases", "Aliases", "aliases"]))
     picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
     weight = _decimal_string(_first_existing(row, ["Weight", "RMS_Weight", "weight"]))
     explicit_weight_unit = _text(_first_existing(row, ["Weight Unit", "WeightUnit", "RMS_WeightUnit", "weight_unit"])).upper()
@@ -184,8 +199,18 @@ def build_standard_family_payload(
     ]))
 
     codes = [{"type": "CUSTOM", "code": sku}]
-    if upc and upc != sku:
+    seen_codes = {sku}
+    if upc and upc not in seen_codes:
         codes.append({"type": "UPC", "code": upc})
+        seen_codes.add(upc)
+    for alias in aliases:
+        if alias in seen_codes:
+            continue
+        # Preserve alternate RMS aliases. Numeric GTIN-like values are barcodes;
+        # other aliases remain CUSTOM codes.
+        alias_type = "UPC" if alias.isdigit() and len(alias) in {8, 12, 13, 14} else "CUSTOM"
+        codes.append({"type": alias_type, "code": alias})
+        seen_codes.add(alias)
 
     product: Dict[str, Any] = {
         "active": {"in_store": True, "ecwid": False},
@@ -208,7 +233,9 @@ def build_standard_family_payload(
         supplier_entry: Dict[str, Any] = {"supplier_id": supplier_id}
         if cost is not None:
             supplier_entry["price"] = cost
-        supplier_code = _text(_first_existing(row, ["RMS_SupplierCode", "supplier_code", "SupplierCode", "ReorderNumber"]))
+        supplier_code = _text(_first_existing(row, [
+            "RMS_SupplierItemCode", "ReorderNumber", "supplier_code", "SupplierCode"
+        ]))
         if supplier_code:
             supplier_entry["code"] = supplier_code
         product["suppliers"] = [supplier_entry]
