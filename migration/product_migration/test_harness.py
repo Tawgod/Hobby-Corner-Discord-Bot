@@ -618,3 +618,112 @@ def execute_controlled_batch(
         results.append(write_result)
 
     return pd.DataFrame(results)
+
+
+def repair_test_batch_images(
+    write_results: pd.DataFrame,
+    *,
+    api_domain: str,
+    token: str,
+    image_search_roots: Iterable[str] = (),
+    timeout: int = 45,
+) -> pd.DataFrame:
+    """
+    Test-only repair helper for products already created by a controlled run.
+
+    Uses Product ID from Migration Test Results, finds Picture Source recursively,
+    uploads the image only when the product currently has no images, then reads
+    the product back. It never creates products and never changes inventory.
+    """
+    import os
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    repaired = []
+    for _, row in write_results.iterrows():
+        product_id = _text(row.get("Product ID"))
+        sku = _text(row.get("SKU"))
+        picture_name = _text(row.get("Picture Source"))
+        out = {
+            "SKU": sku,
+            "Product ID": product_id,
+            "Picture Source": picture_name,
+            "Picture Found": False,
+            "Image Uploaded": False,
+            "Image Verified": False,
+            "Status": "",
+            "Error": "",
+        }
+
+        if not product_id:
+            out["Status"] = "SKIPPED_NO_PRODUCT_ID"
+            repaired.append(out)
+            continue
+
+        picture_path = find_picture_path(picture_name, image_search_roots)
+        out["Picture Found"] = bool(picture_path)
+        if not picture_path:
+            out["Status"] = "MISSING_IMAGE_FILE"
+            repaired.append(out)
+            continue
+
+        try:
+            before = requests.get(
+                f"{base_host}/api/2026-10/products/{product_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not before.ok:
+                raise RuntimeError(f"Product read failed {before.status_code}: {before.text[:1000]}")
+            before_data = before.json().get("data") or {}
+            if before_data.get("images"):
+                out["Status"] = "ALREADY_HAS_IMAGE"
+                out["Image Verified"] = True
+                repaired.append(out)
+                continue
+
+            with open(picture_path, "rb") as fh:
+                upload = requests.post(
+                    f"{base_host}/api/2026-10/products/{product_id}/images",
+                    headers=headers,
+                    files={"image": (os.path.basename(picture_path), fh)},
+                    timeout=timeout,
+                )
+            if not upload.ok:
+                raise RuntimeError(f"Image upload failed {upload.status_code}: {upload.text[:1000]}")
+            out["Image Uploaded"] = True
+
+            after = requests.get(
+                f"{base_host}/api/2026-10/products/{product_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not after.ok:
+                raise RuntimeError(f"Product verify failed {after.status_code}: {after.text[:1000]}")
+            after_data = after.json().get("data") or {}
+            out["Image Verified"] = bool(after_data.get("images"))
+            out["Status"] = "IMAGE_VERIFIED" if out["Image Verified"] else "ERROR"
+            if not out["Image Verified"]:
+                out["Error"] = "Image was not present on read-back."
+        except Exception as exc:
+            out["Status"] = "ERROR"
+            out["Error"] = str(exc)
+
+        repaired.append(out)
+
+    return pd.DataFrame(repaired)
