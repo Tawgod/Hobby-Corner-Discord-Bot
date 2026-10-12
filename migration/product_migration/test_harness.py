@@ -808,3 +808,190 @@ def repair_test_batch_images(
         repaired.append(out)
 
     return pd.DataFrame(repaired)
+
+
+def set_and_verify_reorder_points(
+    product_id: str,
+    *,
+    api_domain: str,
+    token: str,
+    outlet_id: str,
+    reorder_point: float,
+    restock_level: float,
+    timeout: int = 45,
+) -> Dict[str, Any]:
+    """
+    Set Lightspeed MIN_MAX reorder configuration for one product/outlet and
+    verify that current on-hand inventory did not change.
+
+    RMS proposed_reorder_point maps to reorder_point (minimum).
+    RMS proposed_restock_level maps to reorder_target (maximum).
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    product_id = _text(product_id)
+    outlet_id = _text(outlet_id)
+
+    if not domain or not auth_token or not product_id or not outlet_id:
+        raise ValueError("Domain, token, product_id, and outlet_id are required.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    def read_inventory() -> Dict[str, Any]:
+        res = requests.post(
+            f"{base_host}/api/2026-04/inventory",
+            headers=headers,
+            json={
+                "product_id": product_id,
+                "variants": False,
+                "size": 100,
+                "sort_direction": "desc",
+            },
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(f"Inventory read failed {res.status_code}: {res.text[:1000]}")
+        body = res.json()
+        rows = body if isinstance(body, list) else body.get("data", [])
+        row = next(
+            (
+                x for x in rows
+                if isinstance(x, dict)
+                and _text(x.get("product_id")) == product_id
+                and _text(x.get("outlet_id")) == outlet_id
+            ),
+            None,
+        )
+        if not row:
+            raise RuntimeError(
+                f"No inventory record found for product {product_id} at outlet {outlet_id}."
+            )
+        return row
+
+    before = read_inventory()
+    before_qty = before.get("current_inventory_level")
+
+    payload = [{
+        "product_id": product_id,
+        "outlet_id": outlet_id,
+        "method": "MIN_MAX",
+        "reorder_point": float(reorder_point),
+        "reorder_target": float(restock_level),
+    }]
+
+    write = requests.post(
+        f"{base_host}/api/2026-04/inventory/reorder_points",
+        headers=headers,
+        json=payload,
+        timeout=timeout,
+    )
+    if not write.ok:
+        raise RuntimeError(f"Reorder update failed {write.status_code}: {write.text[:1000]}")
+
+    after = read_inventory()
+    after_qty = after.get("current_inventory_level")
+
+    result = {
+        "Product ID": product_id,
+        "Outlet ID": outlet_id,
+        "Requested Reorder Point": float(reorder_point),
+        "Requested Restock Level": float(restock_level),
+        "Reorder Method": after.get("reorder_method"),
+        "Reorder Point": after.get("reorder_point"),
+        "Reorder Target": after.get("reorder_target"),
+        "Inventory Before": before_qty,
+        "Inventory After": after_qty,
+        "Inventory Unchanged": before_qty == after_qty,
+        "Verified": (
+            before_qty == after_qty
+            and after.get("reorder_method") == "MIN_MAX"
+            and float(after.get("reorder_point")) == float(reorder_point)
+            and float(after.get("reorder_target")) == float(restock_level)
+        ),
+    }
+
+    if not result["Inventory Unchanged"]:
+        raise RuntimeError(
+            f"Safety failure: inventory changed from {before_qty} to {after_qty}."
+        )
+
+    return result
+
+
+def apply_controlled_reorder_batch(
+    rows: pd.DataFrame,
+    *,
+    api_domain: str,
+    token: str,
+    outlet_id: str,
+    max_writes: int = 20,
+) -> pd.DataFrame:
+    """
+    Apply proposed reorder/restock values to an existing controlled test batch.
+
+    Expected columns:
+      - Product ID
+      - SKU
+      - Reorder Point Proposed
+      - Restock Level Proposed
+    """
+    if len(rows) > max_writes:
+        raise ValueError(
+            f"Controlled reorder test contains {len(rows)} rows; hard limit is {max_writes}."
+        )
+
+    out = []
+    for _, row in rows.iterrows():
+        sku = _text(row.get("SKU"))
+        product_id = _text(row.get("Product ID"))
+        rp = pd.to_numeric(row.get("Reorder Point Proposed"), errors="coerce")
+        rl = pd.to_numeric(row.get("Restock Level Proposed"), errors="coerce")
+
+        result = {
+            "SKU": sku,
+            "Product ID": product_id,
+            "Status": "",
+            "Error": "",
+        }
+
+        if not product_id:
+            result["Status"] = "SKIPPED_NO_PRODUCT_ID"
+            out.append(result)
+            continue
+        if pd.isna(rp) or pd.isna(rl):
+            result["Status"] = "SKIPPED_NO_REORDER_VALUES"
+            out.append(result)
+            continue
+
+        try:
+            verified = set_and_verify_reorder_points(
+                product_id,
+                api_domain=api_domain,
+                token=token,
+                outlet_id=outlet_id,
+                reorder_point=float(rp),
+                restock_level=float(rl),
+            )
+            result.update(verified)
+            result["Status"] = "VERIFIED" if verified.get("Verified") else "ERROR"
+            if not verified.get("Verified"):
+                result["Error"] = "Reorder values did not match on read-back."
+        except Exception as exc:
+            result["Status"] = "ERROR"
+            result["Error"] = str(exc)
+
+        out.append(result)
+
+    return pd.DataFrame(out)
