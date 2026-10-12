@@ -1447,13 +1447,79 @@ class TimeclockControlPanel(discord.ui.View):
 def special_orders_headers():
     return {"x-hobby-corner-key": SPECIAL_ORDERS_ADMIN_KEY}
 
-async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id: int):
+def build_gw_preorder_embed(item):
+    embed = discord.Embed(
+        title=str(item.get("title") or "GW Preorder")[:256],
+        description=str(item.get("description") or "")[:4096]
+    )
+    image_url = str(item.get("image_url") or "").strip()
+    if image_url.startswith("https://"):
+        embed.set_image(url=image_url)
+    footer = str(item.get("footer") or "").strip()
+    if footer:
+        embed.set_footer(text=footer[:2048])
+    return embed
+
+def load_gw_discord_preview(campaign_id: int):
     if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        raise RuntimeError("Special Orders API is not configured for the Discord bot.")
+
+    response = requests.get(
+        f"{SPECIAL_ORDERS_API_URL}/preorders/gw/campaigns/{campaign_id}/discord-preview",
+        headers=special_orders_headers(),
+        timeout=20
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        raise RuntimeError(
+            f"Could not load GW Discord preview: {data.get('error', response.text)}"
+        )
+    return data
+
+async def preview_gw_test_campaign(interaction: discord.Interaction, campaign_id: int):
+    data = load_gw_discord_preview(campaign_id)
+    campaign = data.get("campaign", {})
+    blocked = data.get("blocked", [])
+    suppressed = data.get("suppressed", [])
+    posts = data.get("posts", [])
+
+    summary = (
+        f"**GW Discord preview — campaign {campaign.get('id', campaign_id)}**\n"
+        f"{campaign.get('name') or 'Unnamed campaign'}\n"
+        f"Ready posts: **{len(posts)}** · "
+        f"Blocked: **{len(blocked)}** · "
+        f"Suppressed: **{len(suppressed)}**\n"
+        "Nothing has been posted to the Discord test channel."
+    )
+    await interaction.followup.send(summary, ephemeral=True)
+
+    if blocked:
+        reasons = "\n".join(
+            f"- Product {x.get('product_id')}: {x.get('reason', 'Needs review')}"
+            for x in blocked[:20]
+        )
         await interaction.followup.send(
-            "Special Orders API is not configured for the Discord bot.",
+            "**Blocked products**\n" + reasons,
             ephemeral=True
         )
+
+    if not posts:
         return
+
+    for item in posts[:20]:
+        await interaction.followup.send(
+            embed=build_gw_preorder_embed(item),
+            ephemeral=True
+        )
+
+    if len(posts) > 20:
+        await interaction.followup.send(
+            f"{len(posts) - 20} additional approved post(s) were not rendered in Discord preview.",
+            ephemeral=True
+        )
+
+async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id: int):
+    data = load_gw_discord_preview(campaign_id)
 
     try:
         channel_id = int(GW_PREORDER_TEST_CHANNEL_ID)
@@ -1471,19 +1537,6 @@ async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id
                 ephemeral=True
             )
             return
-
-    response = requests.get(
-        f"{SPECIAL_ORDERS_API_URL}/preorders/gw/campaigns/{campaign_id}/discord-preview",
-        headers=special_orders_headers(),
-        timeout=20
-    )
-    data = response.json() if response.content else {}
-    if not response.ok:
-        await interaction.followup.send(
-            f"Could not load GW Discord preview: {data.get('error', response.text)}",
-            ephemeral=True
-        )
-        return
 
     blocked = data.get("blocked", [])
     posts = data.get("posts", [])
@@ -1507,18 +1560,7 @@ async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id
 
     sent = 0
     for item in posts:
-        embed = discord.Embed(
-            title=str(item.get("title") or "GW Preorder")[:256],
-            description=str(item.get("description") or "")[:4096]
-        )
-        image_url = str(item.get("image_url") or "").strip()
-        if image_url.startswith("https://"):
-            embed.set_image(url=image_url)
-        footer = str(item.get("footer") or "").strip()
-        if footer:
-            embed.set_footer(text=footer[:2048])
-
-        message = await channel.send(embed=embed)
+        message = await channel.send(embed=build_gw_preorder_embed(item))
         try:
             await message.add_reaction("✅")
         except Exception as e:
@@ -1534,6 +1576,17 @@ async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id
         f"Published {sent} GW preorder test post(s) to <#{channel_id}>.",
         ephemeral=True
     )
+
+@hc_group.command(name="gw_test_preview", description="Preview an approved GW preorder campaign without posting it")
+@app_commands.describe(campaign_id="Special Orders GW campaign ID")
+async def hc_gw_test_preview(interaction: discord.Interaction, campaign_id: int):
+    if not await require_timeclock_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await preview_gw_test_campaign(interaction, campaign_id)
+    except Exception as e:
+        await interaction.followup.send(f"GW test preview failed: {e}", ephemeral=True)
 
 @hc_group.command(name="gw_test_publish", description="Publish an approved GW preorder campaign to the test channel")
 @app_commands.describe(campaign_id="Special Orders GW campaign ID")
