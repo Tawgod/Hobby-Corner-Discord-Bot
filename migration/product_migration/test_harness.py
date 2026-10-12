@@ -1108,6 +1108,46 @@ def cleanup_existing_test_products(
         result["Picture Source"] = picture_name
 
         if not product_id or not family_id:
+            # Recover IDs from Lightspeed by exact SKU. This handles earlier test
+            # rows where duplicate detection prevented IDs from being written to
+            # Migration Test Results (for example BSI-117).
+            try:
+                search_res = requests.get(
+                    f"{base_host}/api/2.0/products",
+                    params={"sku": sku, "page_size": 50},
+                    headers=headers,
+                    timeout=timeout,
+                )
+                if search_res.ok:
+                    search_body = search_res.json()
+                    raw_data = search_body.get("data")
+                    if isinstance(raw_data, list):
+                        search_candidates = raw_data
+                    elif isinstance(raw_data, dict):
+                        nested = raw_data.get("products")
+                        search_candidates = nested if isinstance(nested, list) else [raw_data]
+                    else:
+                        search_candidates = []
+
+                    exact = next(
+                        (
+                            item for item in search_candidates
+                            if isinstance(item, dict) and _text(item.get("sku")) == sku
+                        ),
+                        None,
+                    )
+                    if exact:
+                        product_id = _text(exact.get("id"))
+                        family_id = _text(
+                            exact.get("family_id")
+                            or exact.get("product_family_id")
+                        )
+                        result["Product ID"] = product_id
+                        result["Family ID"] = family_id
+            except Exception:
+                pass
+
+        if not product_id or not family_id:
             result["Status"] = "MISSING_LIGHTSPEED_IDS"
             result["Review Flags"] = "migration_ids_missing"
             output.append(result)
