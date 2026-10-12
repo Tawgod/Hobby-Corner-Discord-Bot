@@ -314,7 +314,7 @@ class LinkMemberView(discord.ui.View):
         super().__init__(timeout=120)
         self.add_item(LinkMemberSelect())
 
-class ResetPinModal(discord.ui.Modal, title="Reset Timeclock PIN"):
+class EmployeePinModal(discord.ui.Modal, title="Set Timeclock PIN"):
     pin = discord.ui.TextInput(
         label="New 4-digit PIN",
         placeholder="1234",
@@ -323,9 +323,9 @@ class ResetPinModal(discord.ui.Modal, title="Reset Timeclock PIN"):
         max_length=4
     )
 
-    def __init__(self, member: discord.Member):
+    def __init__(self, employee):
         super().__init__()
-        self.member = member
+        self.employee = employee
 
     async def on_submit(self, interaction: discord.Interaction):
         if not await require_timeclock_admin(interaction):
@@ -333,17 +333,22 @@ class ResetPinModal(discord.ui.Modal, title="Reset Timeclock PIN"):
 
         pin_value = str(self.pin).strip()
         if not re.fullmatch(r"\d{4}", pin_value):
-            await interaction.response.send_message("PIN must be exactly 4 digits.", ephemeral=True)
+            await interaction.response.send_message(
+                "The PIN must be exactly 4 digits.",
+                ephemeral=True
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
+
         try:
             response = requests.post(
                 f"{TIMECLOCK_API_URL}/api/timeclock/admin/assign-pin",
                 headers=timeclock_headers(),
                 json={
-                    "discordUserId": str(self.member.id),
-                    "pin": pin_value
+                    "employeeId": self.employee.get("id"),
+                    "pin": pin_value,
+                    "actor": str(interaction.user)
                 },
                 timeout=10
             )
@@ -351,33 +356,108 @@ class ResetPinModal(discord.ui.Modal, title="Reset Timeclock PIN"):
 
             if response.ok:
                 await interaction.followup.send(
-                    f"Updated the timeclock PIN for **{self.member.display_name}**.",
+                    f"Set the timeclock PIN for **{data.get('employeeName', self.employee.get('name'))}**. "
+                    "Discord is not required for this employee to use the store timeclock.",
                     ephemeral=True
                 )
             else:
                 await interaction.followup.send(
-                    f"Could not update PIN: {data.get('error', response.text)}",
+                    f"Could not set PIN: {data.get('error', response.text)}",
                     ephemeral=True
                 )
         except Exception as e:
-            await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
+            await interaction.followup.send(
+                f"Timeclock API error: {e}",
+                ephemeral=True
+            )
 
-class ResetPinMemberSelect(discord.ui.UserSelect):
-    def __init__(self):
+
+class EmployeePinSelect(discord.ui.Select):
+    def __init__(self, employees):
+        self.employee_map = {
+            str(employee.get("id")): employee
+            for employee in employees
+        }
+
+        options = []
+        for employee in employees:
+            pin_status = "PIN set" if employee.get("has_pin") else "No PIN yet"
+            discord_status = (
+                "Discord linked"
+                if employee.get("discord_user_id")
+                else "No Discord"
+            )
+            options.append(
+                discord.SelectOption(
+                    label=str(employee.get("name") or f"Employee {employee.get('id')}")[:100],
+                    value=str(employee.get("id")),
+                    description=f"{pin_status} • {discord_status}"[:100]
+                )
+            )
+
         super().__init__(
-            placeholder="Choose the employee whose PIN should change",
+            placeholder="Choose an employee",
             min_values=1,
-            max_values=1
+            max_values=1,
+            options=options
         )
 
     async def callback(self, interaction: discord.Interaction):
-        member = self.values[0]
-        await interaction.response.send_modal(ResetPinModal(member))
+        if not await require_timeclock_admin(interaction):
+            return
 
-class ResetPinMemberView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=120)
-        self.add_item(ResetPinMemberSelect())
+        employee = self.employee_map.get(self.values[0])
+        if not employee:
+            await interaction.response.send_message(
+                "Employee not found.",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(EmployeePinModal(employee))
+
+
+class EmployeePinSelectView(discord.ui.View):
+    def __init__(self, employees):
+        super().__init__(timeout=180)
+        self.add_item(EmployeePinSelect(employees))
+
+
+async def send_employee_pin_picker(interaction):
+    response = requests.get(
+        f"{TIMECLOCK_API_URL}/api/timeclock/admin/employees",
+        headers=timeclock_headers(),
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+
+    if not response.ok:
+        await interaction.followup.send(
+            f"Could not load employees: {data.get('error', response.text)}",
+            ephemeral=True
+        )
+        return
+
+    employees = data.get("employees", [])
+    if not employees:
+        await interaction.followup.send(
+            "No timeclock employees are available.",
+            ephemeral=True
+        )
+        return
+
+    chunks = [employees[i:i + 25] for i in range(0, len(employees), 25)]
+    for index, chunk in enumerate(chunks, start=1):
+        heading = "Choose an employee to set or reset their timeclock PIN."
+        if len(chunks) > 1:
+            heading += f" Page {index}/{len(chunks)}."
+
+        await interaction.followup.send(
+            heading,
+            view=EmployeePinSelectView(chunk),
+            ephemeral=True
+        )
+
 
 def format_entry_choice(entry):
     clock_in = format_central(entry.get("clock_in"))
@@ -1330,7 +1410,7 @@ async def send_pto_employee_picker(interaction):
 
 class TimeclockControlPanel(discord.ui.View):
     ADMIN_LABELS = {
-        "Employees", "Link Employee", "Reset PIN", "Review Queue",
+        "Employees", "Link Employee", "Set / Reset PIN", "Review Queue",
         "Browse Entries", "Fix Entry", "Create Missed Entry",
         "Time-Off Requests", "Create Shift", "Store Hours", "PTO Eligibility"
     }
@@ -1371,11 +1451,19 @@ class TimeclockControlPanel(discord.ui.View):
             return
         await interaction.response.send_message("Choose the Discord member to link:", view=LinkMemberView(), ephemeral=True)
 
-    @discord.ui.button(label="Reset PIN", style=discord.ButtonStyle.secondary, emoji="🔢", row=1)
+    @discord.ui.button(label="Set / Reset PIN", style=discord.ButtonStyle.secondary, emoji="🔢", row=1)
     async def pin_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await require_timeclock_admin(interaction):
             return
-        await interaction.response.send_message("Choose the linked employee:", view=ResetPinMemberView(), ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await send_employee_pin_picker(interaction)
+        except Exception as e:
+            await interaction.followup.send(
+                f"Timeclock API error: {e}",
+                ephemeral=True
+            )
 
     @discord.ui.button(label="Browse Entries", style=discord.ButtonStyle.secondary, emoji="📋", row=2)
     async def browse_entries_button(self, interaction: discord.Interaction, button: discord.ui.Button):
