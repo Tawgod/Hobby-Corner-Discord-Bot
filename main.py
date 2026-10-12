@@ -41,6 +41,9 @@ CUSTOMER_SYNC_API_URL = os.environ.get("CUSTOMER_SYNC_API_URL", "").rstrip("/")
 CUSTOMER_SYNC_ADMIN_KEY = os.environ.get("CUSTOMER_SYNC_ADMIN_KEY", "")
 MASTER_CUSTOMER_SHEET_ID = os.environ.get("MASTER_CUSTOMER_SHEET_ID", "").strip()
 MASTER_CUSTOMER_TAB = os.environ.get("MASTER_CUSTOMER_TAB", "Customer").strip() or "Customer"
+SPECIAL_ORDERS_API_URL = os.environ.get("SPECIAL_ORDERS_API_URL", "").rstrip("/")
+SPECIAL_ORDERS_ADMIN_KEY = os.environ.get("SPECIAL_ORDERS_ADMIN_KEY", "")
+GW_PREORDER_TEST_CHANNEL_ID = os.environ.get("GW_PREORDER_TEST_CHANNEL_ID", "1336092698935033917").strip()
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -1438,6 +1441,110 @@ class TimeclockControlPanel(discord.ui.View):
         except Exception as e:
             await interaction.followup.send(f"Timeclock API error: {e}", ephemeral=True)
 
+
+
+
+def special_orders_headers():
+    return {"x-hobby-corner-key": SPECIAL_ORDERS_ADMIN_KEY}
+
+async def publish_gw_test_campaign(interaction: discord.Interaction, campaign_id: int):
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        await interaction.followup.send(
+            "Special Orders API is not configured for the Discord bot.",
+            ephemeral=True
+        )
+        return
+
+    try:
+        channel_id = int(GW_PREORDER_TEST_CHANNEL_ID)
+    except ValueError:
+        await interaction.followup.send("GW test channel ID is invalid.", ephemeral=True)
+        return
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except Exception as e:
+            await interaction.followup.send(
+                f"Could not access the configured GW test channel: {e}",
+                ephemeral=True
+            )
+            return
+
+    response = requests.get(
+        f"{SPECIAL_ORDERS_API_URL}/preorders/gw/campaigns/{campaign_id}/discord-preview",
+        headers=special_orders_headers(),
+        timeout=20
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        await interaction.followup.send(
+            f"Could not load GW Discord preview: {data.get('error', response.text)}",
+            ephemeral=True
+        )
+        return
+
+    blocked = data.get("blocked", [])
+    posts = data.get("posts", [])
+    if blocked:
+        reasons = "\n".join(
+            f"- Product {x.get('product_id')}: {x.get('reason', 'Needs review')}"
+            for x in blocked[:20]
+        )
+        await interaction.followup.send(
+            "GW test publish is blocked until these products are reviewed:\n" + reasons,
+            ephemeral=True
+        )
+        return
+
+    if not posts:
+        await interaction.followup.send(
+            "There are no approved GW products to publish.",
+            ephemeral=True
+        )
+        return
+
+    sent = 0
+    for item in posts:
+        embed = discord.Embed(
+            title=str(item.get("title") or "GW Preorder")[:256],
+            description=str(item.get("description") or "")[:4096]
+        )
+        image_url = str(item.get("image_url") or "").strip()
+        if image_url.startswith("https://"):
+            embed.set_image(url=image_url)
+        footer = str(item.get("footer") or "").strip()
+        if footer:
+            embed.set_footer(text=footer[:2048])
+
+        message = await channel.send(embed=embed)
+        try:
+            await message.add_reaction("✅")
+        except Exception as e:
+            print(f"⚠️ Could not add GW preorder reaction to {message.id}: {e}")
+
+        MESSAGE_CACHE[str(message.id)] = {
+            "product": str(item.get("title") or "GW Preorder"),
+            "sku": str(item.get("sku") or "NO_SKU")
+        }
+        sent += 1
+
+    await interaction.followup.send(
+        f"Published {sent} GW preorder test post(s) to <#{channel_id}>.",
+        ephemeral=True
+    )
+
+@hc_group.command(name="gw_test_publish", description="Publish an approved GW preorder campaign to the test channel")
+@app_commands.describe(campaign_id="Special Orders GW campaign ID")
+async def hc_gw_test_publish(interaction: discord.Interaction, campaign_id: int):
+    if not await require_timeclock_admin(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        await publish_gw_test_campaign(interaction, campaign_id)
+    except Exception as e:
+        await interaction.followup.send(f"GW test publish failed: {e}", ephemeral=True)
 
 
 @hc_group.command(name="timeclock", description="Open the Hobby Corner timeclock control panel")
