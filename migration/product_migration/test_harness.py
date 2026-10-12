@@ -995,3 +995,250 @@ def apply_controlled_reorder_batch(
         out.append(result)
 
     return pd.DataFrame(out)
+
+
+def cleanup_existing_test_products(
+    candidates: pd.DataFrame,
+    write_results: pd.DataFrame,
+    *,
+    api_domain: str,
+    token: str,
+    image_search_roots: Iterable[str] = (),
+    timeout: int = 45,
+) -> pd.DataFrame:
+    """
+    Cleanup products already created by the controlled migration test.
+
+    Source rules:
+      - Lightspeed family name / customer-facing item description:
+        RMS Web Description first, RMS Description only as fallback.
+      - Lightspeed long description:
+        RMS ExtendedDescription / Ext. Description when available.
+      - Existing PictureName image is uploaded if the product has no image.
+      - Low-resolution images are still used but receive poor_quality_image.
+
+    This helper never creates products and never writes inventory.
+    """
+    import os
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    # Build exact SKU lookup from the enriched RMS candidate export.
+    candidate_by_sku: Dict[str, pd.Series] = {}
+    for _, source_row in candidates.iterrows():
+        source_sku = _text(_first_existing(
+            source_row, ["RMS_SKU", "ItemLookupCode", "SKU", "Item Lookup Code"]
+        ))
+        if source_sku:
+            candidate_by_sku[source_sku] = source_row
+
+    output = []
+
+    for _, created_row in write_results.iterrows():
+        sku = _text(created_row.get("SKU"))
+        product_id = _text(created_row.get("Product ID"))
+        family_id = _text(created_row.get("Family ID"))
+
+        result: Dict[str, Any] = {
+            "SKU": sku,
+            "Product ID": product_id,
+            "Family ID": family_id,
+            "Status": "",
+            "RMS Description": "",
+            "RMS Web Description": "",
+            "Desired Name": "",
+            "Name Source": "",
+            "Name Updated": False,
+            "Name Verified": False,
+            "Long Description Updated": False,
+            "Long Description Verified": False,
+            "Picture Source": "",
+            "Picture Found": False,
+            "Image Uploaded": False,
+            "Image Verified": False,
+            "Image Width": "",
+            "Image Height": "",
+            "Image Low Quality": False,
+            "Review Flags": "",
+            "Error": "",
+        }
+
+        source_row = candidate_by_sku.get(sku)
+        if source_row is None:
+            result["Status"] = "SOURCE_NOT_FOUND"
+            result["Review Flags"] = "migration_source_missing"
+            output.append(result)
+            continue
+
+        rms_description = _text(_first_existing(
+            source_row, ["RMS_Description", "Description"]
+        ))
+        web_description = _text(_first_existing(
+            source_row, ["Web Description", "RMS_WebDescription", "WebDescription"]
+        ))
+        desired_name = web_description or rms_description
+        name_source = "Web Description" if web_description else "RMS Description"
+
+        long_description = _text(_first_existing(
+            source_row, ["ExtendedDescription", "Ext. Description"]
+        ))
+        picture_name = _text(_first_existing(
+            source_row, ["PictureName", "Picture", "RMS_Picture"]
+        ))
+
+        result["RMS Description"] = rms_description
+        result["RMS Web Description"] = web_description
+        result["Desired Name"] = desired_name
+        result["Name Source"] = name_source
+        result["Picture Source"] = picture_name
+
+        if not product_id or not family_id:
+            result["Status"] = "MISSING_LIGHTSPEED_IDS"
+            result["Review Flags"] = "migration_ids_missing"
+            output.append(result)
+            continue
+
+        review_flags: List[str] = []
+
+        try:
+            family_res = requests.get(
+                f"{base_host}/api/2026-10/product_families/{family_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not family_res.ok:
+                raise RuntimeError(
+                    f"Family read failed {family_res.status_code}: {family_res.text[:1000]}"
+                )
+            family_data = family_res.json().get("data") or {}
+
+            patch: Dict[str, Any] = {}
+            if desired_name and _text(family_data.get("name")) != desired_name:
+                patch["name"] = desired_name
+            if long_description and _text(family_data.get("description")) != long_description:
+                patch["description"] = long_description
+
+            if patch:
+                patch_res = requests.patch(
+                    f"{base_host}/api/2026-10/product_families/{family_id}",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json=patch,
+                    timeout=timeout,
+                )
+                if not patch_res.ok:
+                    raise RuntimeError(
+                        f"Family patch failed {patch_res.status_code}: {patch_res.text[:1000]}"
+                    )
+                result["Name Updated"] = "name" in patch
+                result["Long Description Updated"] = "description" in patch
+
+            # Verify family text after patch.
+            verify_family_res = requests.get(
+                f"{base_host}/api/2026-10/product_families/{family_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not verify_family_res.ok:
+                raise RuntimeError(
+                    f"Family verify failed {verify_family_res.status_code}: "
+                    f"{verify_family_res.text[:1000]}"
+                )
+            verify_family = verify_family_res.json().get("data") or {}
+            result["Name Verified"] = (
+                bool(desired_name) and _text(verify_family.get("name")) == desired_name
+            )
+            result["Long Description Verified"] = (
+                not long_description
+                or _text(verify_family.get("description")) == long_description
+            )
+
+            # Attach source image if the product currently has none.
+            product_res = requests.get(
+                f"{base_host}/api/2026-10/products/{product_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not product_res.ok:
+                raise RuntimeError(
+                    f"Product read failed {product_res.status_code}: {product_res.text[:1000]}"
+                )
+            product_data = product_res.json().get("data") or {}
+            existing_images = product_data.get("images") or []
+
+            picture_path = find_picture_path(picture_name, image_search_roots)
+            result["Picture Found"] = bool(picture_path)
+
+            if picture_name and not picture_path:
+                review_flags.append("missing_image")
+
+            if picture_path:
+                quality = assess_image_quality(picture_path)
+                result["Image Width"] = quality.get("width") or ""
+                result["Image Height"] = quality.get("height") or ""
+                result["Image Low Quality"] = bool(quality.get("low_quality"))
+                review_flags.extend(quality.get("review_flags") or [])
+
+                if not existing_images:
+                    with open(picture_path, "rb") as fh:
+                        upload = requests.post(
+                            f"{base_host}/api/2026-10/products/{product_id}/images",
+                            headers=headers,
+                            files={"image": (os.path.basename(picture_path), fh)},
+                            timeout=timeout,
+                        )
+                    if not upload.ok:
+                        raise RuntimeError(
+                            f"Image upload failed {upload.status_code}: {upload.text[:1000]}"
+                        )
+                    result["Image Uploaded"] = True
+
+            verify_product_res = requests.get(
+                f"{base_host}/api/2026-10/products/{product_id}",
+                headers=headers,
+                timeout=timeout,
+            )
+            if not verify_product_res.ok:
+                raise RuntimeError(
+                    f"Product verify failed {verify_product_res.status_code}: "
+                    f"{verify_product_res.text[:1000]}"
+                )
+            verify_product = verify_product_res.json().get("data") or {}
+            result["Image Verified"] = bool(verify_product.get("images"))
+
+            if not result["Name Verified"]:
+                review_flags.append("name_review")
+            if picture_name and not result["Image Verified"]:
+                review_flags.append("missing_image")
+
+            result["Review Flags"] = ",".join(sorted(set(review_flags)))
+            result["Status"] = (
+                "VERIFIED"
+                if result["Name Verified"]
+                and result["Long Description Verified"]
+                and (not picture_name or result["Image Verified"])
+                else "REVIEW"
+            )
+
+        except Exception as exc:
+            result["Status"] = "ERROR"
+            result["Error"] = str(exc)
+            result["Review Flags"] = ",".join(sorted(set(review_flags)))
+
+        output.append(result)
+
+    return pd.DataFrame(output)
