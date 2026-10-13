@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-access","database-relations","table-preview","table-count","customers-preview","product-export","snapshot")]
+  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-access","database-relations","migration-discovery","table-preview","table-count","customers-preview","product-export","snapshot")]
   [string]$Action = "test",
   [string]$ConfigPath = "$PSScriptRoot\config.json",
   [string]$TableName = "",
@@ -333,6 +333,78 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
     Write-Host "Readable with current SQL login: $($readable.Count)" -ForegroundColor Green
     Write-Host "Not readable with current SQL login: $($blocked.Count)" -ForegroundColor $(if($blocked.Count -eq 0){"Green"}else{"Yellow"})
     $rows | Format-Table -AutoSize
+  }
+
+
+  "migration-discovery" {
+    $targets = @(
+      "NitroSell_ProductNavigation",
+      "nitrosell_productphotos",
+      "NitroSell_WebCategory",
+      "NitroSell_WebDepartment",
+      "NitroSell_WebProductNavigation",
+      "WebLinK_item",
+      "WebLinK_itemdynamic",
+      "WebLinK_nitrosellpicturedetails",
+      "WebLinK_productimages",
+      "WebLinK_productnavigation",
+      "WebLinK_category",
+      "Voucher",
+      "VoucherEntry",
+      "VoucherFormatNumber",
+      "AccountReceivable",
+      "AccountReceivableHistory",
+      "ARHistoryMirror",
+      "Transaction",
+      "TransactionEntry",
+      "PUBLIC_Transaction",
+      "PUBLIC_TransactionEntry",
+      "PurchaseOrder",
+      "PurchaseOrderEntry",
+      "PurchaseOrderEntryDetail"
+    )
+
+    foreach ($target in $targets) {
+      Write-Host ""
+      Write-Host ("=" * 88) -ForegroundColor DarkGray
+      Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
+
+      $escaped = $target.Replace("'", "''")
+      $meta = @(Invoke-SqlRows @"
+SELECT
+    T.TABLE_SCHEMA,
+    T.TABLE_NAME,
+    T.TABLE_TYPE,
+    C.ORDINAL_POSITION,
+    C.COLUMN_NAME,
+    C.DATA_TYPE,
+    C.CHARACTER_MAXIMUM_LENGTH,
+    C.IS_NULLABLE
+FROM INFORMATION_SCHEMA.TABLES T
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
+  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
+WHERE T.TABLE_NAME='$escaped'
+ORDER BY C.ORDINAL_POSITION;
+"@)
+
+      if ($meta.Count -eq 0) {
+        Write-Host "Not present." -ForegroundColor Yellow
+        continue
+      }
+
+      $meta | Format-Table -AutoSize
+
+      $safe = Resolve-SafeTableName $target
+      $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
+      Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
+
+      Write-Host "Sample rows (TOP 5):" -ForegroundColor DarkCyan
+      try {
+        @(Invoke-SqlRows "SELECT TOP 5 * FROM $safe;") | Format-List
+      } catch {
+        Write-Host "Sample read failed: $($_.Exception.Message)" -ForegroundColor Yellow
+      }
+    }
   }
 
   "database-relations" {
