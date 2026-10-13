@@ -26,6 +26,30 @@ SUPPLIER_TARGET_HEADERS = [
     "Primary Supplier",
 ]
 
+# RMS categories intentionally left without a Lightspeed product-category mapping.
+# These are empty/legacy/special-system categories and should never be treated as
+# migration mapping errors. The LS: importer Mapping sheet remains authoritative
+# for all normal product categories.
+INTENTIONAL_CATEGORY_EXCLUSIONS = {
+    ("games", "rental"),
+    ("gift cards", ""),
+    ("media", "videos"),
+    ("other", "discount"),
+    ("other", "online only"),
+    ("rewards", "store credit voucher"),
+    ("special orders", ""),
+}
+
+INTENTIONAL_EXCLUDED_DEPARTMENTS = {
+    "homebrew",
+}
+
+
+def is_intentional_category_exclusion(department, category) -> bool:
+    dept = norm(department)
+    cat = norm(category)
+    return dept in INTENTIONAL_EXCLUDED_DEPARTMENTS or (dept, cat) in INTENTIONAL_CATEGORY_EXCLUSIONS
+
 
 def norm(value) -> str:
     if pd.isna(value):
@@ -177,15 +201,26 @@ def analyze_candidates(
 
         cat_key = (norm(row.get("RMS_Department")), norm(row.get("RMS_Category")))
         cat = category_map.get(cat_key)
+        intentional_category_exclusion = is_intentional_category_exclusion(
+            row.get("RMS_Department"), row.get("RMS_Category")
+        )
         result["LS_Category_Path"] = cat["path"] if cat else ""
         result["Category_Mapped"] = bool(cat)
+        result["Category_Intentionally_Excluded"] = intentional_category_exclusion
+
+        if intentional_category_exclusion:
+            result["migration_status"] = "EXCLUDE"
+            existing = result.get("review_reason", "")
+            result["review_reason"] = "; ".join(
+                [x for x in [existing, "Intentional non-migrating RMS category"] if x]
+            )
 
         supplier = supplier_map.get(norm(row.get("RMS_Supplier")), "")
         result["LS_Supplier"] = supplier
         result["Supplier_Mapped"] = bool(supplier)
 
         mapping_reasons = []
-        if not cat:
+        if not cat and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
         if not supplier and str(row.get("RMS_Supplier", "")).strip():
             mapping_reasons.append("Unmapped supplier")
