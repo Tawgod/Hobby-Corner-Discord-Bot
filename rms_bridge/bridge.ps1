@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count","customers-preview","product-export","snapshot")]
+  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-access","database-relations","table-preview","table-count","customers-preview","product-export","snapshot")]
   [string]$Action = "test",
   [string]$ConfigPath = "$PSScriptRoot\config.json",
   [string]$TableName = "",
@@ -309,6 +309,29 @@ ORDER BY TABLE_SCHEMA,TABLE_NAME;
 "@
     $rows=@(Invoke-SqlRows $q)
     Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
+  }
+
+  "database-access" {
+    $q = @"
+SELECT
+    T.TABLE_SCHEMA,
+    T.TABLE_NAME,
+    T.TABLE_TYPE,
+    CAST(HAS_PERMS_BY_NAME(
+        QUOTENAME(T.TABLE_SCHEMA) + '.' + QUOTENAME(T.TABLE_NAME),
+        'OBJECT',
+        'SELECT'
+    ) AS int) AS CanSelect
+FROM INFORMATION_SCHEMA.TABLES T
+ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
+"@
+    $rows=@(Invoke-SqlRows $q)
+    $readable=@($rows | Where-Object { [int]$_.CanSelect -eq 1 })
+    $blocked=@($rows | Where-Object { [int]$_.CanSelect -ne 1 })
+    Write-Host "Visible tables/views: $($rows.Count)" -ForegroundColor Green
+    Write-Host "Readable with current SQL login: $($readable.Count)" -ForegroundColor Green
+    Write-Host "Not readable with current SQL login: $($blocked.Count)" -ForegroundColor $(if($blocked.Count -eq 0){"Green"}else{"Yellow"})
     $rows | Format-Table -AutoSize
   }
 
