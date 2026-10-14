@@ -376,8 +376,16 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     """
     Resolve PictureName against one or more local/Drive folders.
 
-    Exact filename wins. A case-insensitive filename match is allowed so RMS
-    names like .JPG still resolve on case-sensitive Colab mounts.
+    Match order:
+      1. exact path / exact filename
+      2. case-insensitive full filename
+      3. case-insensitive filename stem across common image extensions
+
+    RMS PictureName values are not always extension-consistent with the files
+    copied into Drive (for example .jpg vs .jpeg), so the stem is treated as
+    the product-image identity after exact matching has failed.
+
+    If multiple different files share the same stem, do not guess.
     """
     import os
 
@@ -385,7 +393,14 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     if not name:
         return None
 
-    wanted = name.casefold()
+    wanted = os.path.basename(name).casefold()
+    wanted_stem = os.path.splitext(wanted)[0]
+    image_extensions = {
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"
+    }
+
+    full_matches = []
+    stem_matches = []
 
     for root in search_roots:
         root = _text(root)
@@ -396,18 +411,36 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
         if os.path.isfile(exact):
             return exact
 
-        # Images are commonly organized into nested Drive folders such as
-        # Lightspeed Ready/category/vendor. Walk recursively so PictureName
-        # does not depend on a specific folder layout.
         try:
             for current_root, _, files in os.walk(root):
                 for filename in files:
-                    if filename.casefold() == wanted:
-                        candidate = os.path.join(current_root, filename)
-                        if os.path.isfile(candidate):
-                            return candidate
+                    candidate = os.path.join(current_root, filename)
+                    if not os.path.isfile(candidate):
+                        continue
+
+                    folded = filename.casefold()
+                    if folded == wanted:
+                        full_matches.append(candidate)
+                        continue
+
+                    stem, ext = os.path.splitext(folded)
+                    if stem == wanted_stem and ext in image_extensions:
+                        stem_matches.append(candidate)
         except OSError:
             continue
+
+    # A case-insensitive full filename is still unambiguous and preferred.
+    unique_full = list(dict.fromkeys(full_matches))
+    if len(unique_full) == 1:
+        return unique_full[0]
+    if len(unique_full) > 1:
+        return None
+
+    # Extension-flexible matching is safe only when exactly one source file
+    # resolves to the RMS filename stem.
+    unique_stem = list(dict.fromkeys(stem_matches))
+    if len(unique_stem) == 1:
+        return unique_stem[0]
 
     return None
 
