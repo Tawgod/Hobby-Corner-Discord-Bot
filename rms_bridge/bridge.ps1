@@ -1,5 +1,5 @@
 param(
-  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-access","database-relations","migration-discovery","table-preview","table-count","customers-preview","product-export","snapshot")]
+  [ValidateSet("test","schema","product-schema","database-schema","database-tables","database-access","database-relations","migration-discovery","product-web-diagnostic","table-preview","table-count","customers-preview","product-export","snapshot")]
   [string]$Action = "test",
   [string]$ConfigPath = "$PSScriptRoot\config.json",
   [string]$TableName = "",
@@ -404,6 +404,47 @@ ORDER BY C.ORDINAL_POSITION;
       } catch {
         Write-Host "Sample read failed: $($_.Exception.Message)" -ForegroundColor Yellow
       }
+    }
+  }
+
+
+  "product-web-diagnostic" {
+    $q = @"
+SELECT TOP 50
+    I.ID,
+    I.ItemLookupCode,
+    I.Description,
+    I.ExtendedDescription,
+    I.Content,
+    I.PictureName,
+    WI.*
+FROM Item I
+LEFT JOIN WebLinK_item WI
+  ON WI.id = I.ID
+WHERE I.ItemLookupCode IN (
+    'DOW7201','TES1133TT','TES1162TT','BSI-117','ULP81126','ULP81156',
+    'TES1103TT','TES1104TT','TES1108TT','TES1110TT','TES1111TT','TES1112TT'
+)
+ORDER BY I.ItemLookupCode;
+"@
+    try {
+      $rows = @(Invoke-SqlRows $q)
+      Write-Host "Web-description diagnostic rows: $($rows.Count)" -ForegroundColor Green
+      $rows | Format-List
+    } catch {
+      Write-Host "Direct Item/WebLinK join failed; showing schemas instead." -ForegroundColor Yellow
+      foreach ($target in @("Item","WebLinK_item","WebLinK_itemdynamic")) {
+        Write-Host ""
+        Write-Host "SCHEMA: $target" -ForegroundColor Cyan
+        $escaped = $target.Replace("'", "''")
+        @(Invoke-SqlRows @"
+SELECT ORDINAL_POSITION,COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH
+FROM INFORMATION_SCHEMA.COLUMNS
+WHERE TABLE_NAME='$escaped'
+ORDER BY ORDINAL_POSITION;
+"@) | Format-Table -AutoSize
+      }
+      throw
     }
   }
 
