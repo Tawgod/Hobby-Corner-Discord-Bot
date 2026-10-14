@@ -1535,6 +1535,38 @@ class TimeclockControlPanel(discord.ui.View):
 def special_orders_headers():
     return {"x-hobby-corner-key": SPECIAL_ORDERS_ADMIN_KEY}
 
+def record_gw_reaction(payload, user, action):
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        print("WARNING: GW reaction capture is not configured.")
+        return False
+    try:
+        response = requests.post(
+            f"{SPECIAL_ORDERS_API_URL}/preorders/gw/discord-reaction",
+            headers={**special_orders_headers(), "Content-Type": "application/json"},
+            json={
+                "message_id": str(payload.message_id),
+                "discord_user_id": str(user.id),
+                "discord_username": str(user.name),
+                "action": str(action).upper(),
+            },
+            timeout=10
+        )
+        data = response.json() if response.content else {}
+        if response.status_code == 404:
+            # Not a mapped GW preorder post. Let legacy handlers decide what to do.
+            return False
+        if not response.ok:
+            print(f"❌ GW reaction API failed ({response.status_code}): {data.get('error', response.text)}")
+            return True
+        if not data.get("matched_customer", True):
+            print(f"⚠️ GW reaction recorded but Discord user {user.id} is not linked to a customer.")
+        else:
+            print(f"✅ GW reaction {action}: user {user.id}, message {payload.message_id}")
+        return True
+    except Exception as e:
+        print(f"❌ GW reaction capture failed: {e}")
+        return True
+
 def build_gw_preorder_embed(item):
     embed = discord.Embed(
         title=str(item.get("title") or "GW Preorder")[:256],
@@ -1965,17 +1997,22 @@ async def on_ready():
 
 @bot.event
 async def on_raw_reaction_add(payload):
-    if client is None:
-        return
-
     channel_id_str = str(payload.channel_id)
     message_id_str = str(payload.message_id)
 
-    if channel_id_str not in CHANNEL_MAP:
+    user = await bot.fetch_user(payload.user_id)
+    if user.bot:
         return
 
-    user = await bot.fetch_user(payload.user_id)
-    if user.bot: 
+    if channel_id_str == GW_PREORDER_TEST_CHANNEL_ID:
+        handled = record_gw_reaction(payload, user, "ADD")
+        if handled:
+            return
+
+    if client is None:
+        return
+
+    if channel_id_str not in CHANNEL_MAP:
         return
         
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -2029,11 +2066,16 @@ async def on_raw_reaction_remove(payload):
     channel_id_str = str(payload.channel_id)
     message_id_str = str(payload.message_id)
 
-    if channel_id_str not in CHANNEL_MAP:
+    user = await bot.fetch_user(payload.user_id)
+    if user.bot:
         return
 
-    user = await bot.fetch_user(payload.user_id)
-    if user.bot: 
+    if channel_id_str == GW_PREORDER_TEST_CHANNEL_ID:
+        handled = record_gw_reaction(payload, user, "REMOVE")
+        if handled:
+            return
+
+    if channel_id_str not in CHANNEL_MAP:
         return
     
     destination = CHANNEL_MAP[channel_id_str]
