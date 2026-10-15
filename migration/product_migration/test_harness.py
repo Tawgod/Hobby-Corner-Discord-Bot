@@ -376,16 +376,18 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     """
     Resolve PictureName against one or more local/Drive folders.
 
-    Match order:
-      1. exact path / exact filename
+    Search-root order is authoritative. This is important because Hobby Corner
+    can have the same filename in multiple image folders; Lightspeed Ready
+    should win over Pictures, Pictures over Attention, etc.
+
+    Within each root:
+      1. exact filename
       2. case-insensitive full filename
-      3. case-insensitive filename stem across common image extensions
+      3. same filename stem across common image extensions
 
-    RMS PictureName values are not always extension-consistent with the files
-    copied into Drive (for example .jpg vs .jpeg), so the stem is treated as
-    the product-image identity after exact matching has failed.
-
-    If multiple different files share the same stem, do not guess.
+    If multiple stem-only matches exist inside the same priority root, do not
+    guess. Duplicate matches in lower-priority roots do not invalidate a
+    higher-priority match.
     """
     import os
 
@@ -393,23 +395,24 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
     if not name:
         return None
 
-    wanted = os.path.basename(name).casefold()
+    basename = os.path.basename(name)
+    wanted = basename.casefold()
     wanted_stem = os.path.splitext(wanted)[0]
     image_extensions = {
         ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"
     }
-
-    full_matches = []
-    stem_matches = []
 
     for root in search_roots:
         root = _text(root)
         if not root or not os.path.isdir(root):
             continue
 
-        exact = os.path.join(root, name)
+        exact = os.path.join(root, basename)
         if os.path.isfile(exact):
             return exact
+
+        full_matches = []
+        stem_matches = []
 
         try:
             for current_root, _, files in os.walk(root):
@@ -429,22 +432,21 @@ def find_picture_path(picture_name: Any, search_roots: Iterable[str]) -> Optiona
         except OSError:
             continue
 
-    # A case-insensitive full filename is still unambiguous and preferred.
-    unique_full = list(dict.fromkeys(full_matches))
-    if len(unique_full) == 1:
-        return unique_full[0]
-    if len(unique_full) > 1:
-        return None
+        unique_full = list(dict.fromkeys(full_matches))
+        if unique_full:
+            # Same filename in this priority root is acceptable; folder order
+            # inside the root is deterministic and preferable to falling
+            # through to a lower-priority source.
+            return unique_full[0]
 
-    # Extension-flexible matching is safe only when exactly one source file
-    # resolves to the RMS filename stem.
-    unique_stem = list(dict.fromkeys(stem_matches))
-    if len(unique_stem) == 1:
-        return unique_stem[0]
+        unique_stem = list(dict.fromkeys(stem_matches))
+        if len(unique_stem) == 1:
+            return unique_stem[0]
+        if len(unique_stem) > 1:
+            # Ambiguous only within the same priority root.
+            return None
 
     return None
-
-
 
 def assess_image_quality(
     picture_path: Optional[str],
