@@ -700,7 +700,7 @@ def execute_controlled_product_write(
 
             with open(picture_path, "rb") as fh:
                 upload = requests.post(
-                    f"{base_host}/api/2026-10/products/{product_id}/images",
+                    f"{base_host}/api/2026-10/product_families/{family_id}/images",
                     headers=headers,
                     files={"image": (os.path.basename(picture_path), fh)},
                     timeout=timeout,
@@ -726,12 +726,9 @@ def execute_controlled_product_write(
             not expected_description or actual_description == expected_description
         )
 
-        verified_products = family_data.get("products") or []
-        verified_product = next(
-            (p for p in verified_products if _text(p.get("id")) == product_id),
-            {},
-        )
-        images = verified_product.get("images") or []
+        # Standard-product catalog images belong on the family. Product-level
+        # images are variant/member images and may not appear in the Retail UI.
+        images = family_data.get("images") or []
         result["Image Verified"] = bool(images) if picture_path else False
 
         result["Status"] = "CREATED"
@@ -872,13 +869,18 @@ def repair_test_batch_images(
             out["Image Low Quality"] = bool(quality.get("low_quality"))
             out["Review Flags"] = ",".join(quality.get("review_flags") or [])
 
+            # Retail's visible standard-product image is family-level.
+            family_id = _text(created_row.get("Family ID"))
+            if not family_id:
+                raise RuntimeError("Missing Family ID for image repair.")
+
             before = requests.get(
-                f"{base_host}/api/2026-10/products/{product_id}",
+                f"{base_host}/api/2026-10/product_families/{family_id}",
                 headers=headers,
                 timeout=timeout,
             )
             if not before.ok:
-                raise RuntimeError(f"Product read failed {before.status_code}: {before.text[:1000]}")
+                raise RuntimeError(f"Family read failed {before.status_code}: {before.text[:1000]}")
             before_data = before.json().get("data") or {}
             if before_data.get("images"):
                 out["Status"] = "ALREADY_HAS_IMAGE"
@@ -888,7 +890,7 @@ def repair_test_batch_images(
 
             with open(picture_path, "rb") as fh:
                 upload = requests.post(
-                    f"{base_host}/api/2026-10/products/{product_id}/images",
+                    f"{base_host}/api/2026-10/product_families/{family_id}/images",
                     headers=headers,
                     files={"image": (os.path.basename(picture_path), fh)},
                     timeout=timeout,
@@ -898,12 +900,12 @@ def repair_test_batch_images(
             out["Image Uploaded"] = True
 
             after = requests.get(
-                f"{base_host}/api/2026-10/products/{product_id}",
+                f"{base_host}/api/2026-10/product_families/{family_id}",
                 headers=headers,
                 timeout=timeout,
             )
             if not after.ok:
-                raise RuntimeError(f"Product verify failed {after.status_code}: {after.text[:1000]}")
+                raise RuntimeError(f"Family verify failed {after.status_code}: {after.text[:1000]}")
             after_data = after.json().get("data") or {}
             out["Image Verified"] = bool(after_data.get("images"))
             out["Status"] = "IMAGE_VERIFIED" if out["Image Verified"] else "ERROR"
@@ -1315,18 +1317,9 @@ def cleanup_existing_test_products(
                 or _text(verify_family.get("description")) == long_description
             )
 
-            # Attach source image if the product currently has none.
-            product_res = requests.get(
-                f"{base_host}/api/2026-10/products/{product_id}",
-                headers=headers,
-                timeout=timeout,
-            )
-            if not product_res.ok:
-                raise RuntimeError(
-                    f"Product read failed {product_res.status_code}: {product_res.text[:1000]}"
-                )
-            product_data = product_res.json().get("data") or {}
-            existing_images = product_data.get("images") or []
+            # Attach the source image at family level so it is visible in the
+            # standard-product catalog/editor UI.
+            existing_images = family_data.get("images") or []
 
             picture_path = find_picture_path(picture_name, image_search_roots)
             result["Picture Found"] = bool(picture_path)
@@ -1344,7 +1337,7 @@ def cleanup_existing_test_products(
                 if not existing_images:
                     with open(picture_path, "rb") as fh:
                         upload = requests.post(
-                            f"{base_host}/api/2026-10/products/{product_id}/images",
+                            f"{base_host}/api/2026-10/product_families/{family_id}/images",
                             headers=headers,
                             files={"image": (os.path.basename(picture_path), fh)},
                             timeout=timeout,
@@ -1355,18 +1348,18 @@ def cleanup_existing_test_products(
                         )
                     result["Image Uploaded"] = True
 
-            verify_product_res = requests.get(
-                f"{base_host}/api/2026-10/products/{product_id}",
+            verify_image_res = requests.get(
+                f"{base_host}/api/2026-10/product_families/{family_id}",
                 headers=headers,
                 timeout=timeout,
             )
-            if not verify_product_res.ok:
+            if not verify_image_res.ok:
                 raise RuntimeError(
-                    f"Product verify failed {verify_product_res.status_code}: "
-                    f"{verify_product_res.text[:1000]}"
+                    f"Family image verify failed {verify_image_res.status_code}: "
+                    f"{verify_image_res.text[:1000]}"
                 )
-            verify_product = verify_product_res.json().get("data") or {}
-            result["Image Verified"] = bool(verify_product.get("images"))
+            verify_image_family = verify_image_res.json().get("data") or {}
+            result["Image Verified"] = bool(verify_image_family.get("images"))
 
             if not result["Name Verified"]:
                 review_flags.append("name_review")
