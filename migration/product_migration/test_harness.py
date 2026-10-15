@@ -101,7 +101,7 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
-def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
+def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Optional[Iterable[str]] = None) -> pd.DataFrame:
     """
     Pick a representative, fully mapped READY batch.
 
@@ -123,8 +123,14 @@ def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
         & result["Supplier_Mapped"].astype(bool)
     ].copy()
 
+    excluded = {
+        _text(x).casefold()
+        for x in (exclude_skus or [])
+        if _text(x)
+    }
+
     if eligible.empty:
-        raise ValueError("No fully mapped READY products are available for a test batch.")
+        raise ValueError("No new fully mapped READY products are available for a test batch after excluding prior test SKUs.")
 
     def txt_series(names):
         for name in names:
@@ -133,6 +139,10 @@ def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
         return pd.Series("", index=eligible.index)
 
     eligible["_sku"] = txt_series(["RMS_SKU", "ItemLookupCode", "SKU"])
+    if excluded:
+        eligible = eligible[
+            ~eligible["_sku"].astype(str).str.strip().str.casefold().isin(excluded)
+        ].copy()
     eligible["_category"] = eligible.get(
         "LS_Category_Path", pd.Series("", index=eligible.index)
     ).fillna("").astype(str).str.strip()
