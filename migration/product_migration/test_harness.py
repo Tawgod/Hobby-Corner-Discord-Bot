@@ -101,16 +101,21 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
-def select_test_batch(result: pd.DataFrame, size: int = 8) -> pd.DataFrame:
+def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
     """
-    Pick a varied, fully mapped READY batch.
+    Pick a representative, fully mapped READY batch.
 
-    Priority buckets:
-      - normal READY products
-      - reorder suppressed READY products
-      - inactive or DoNotOrder products that still qualified READY
-      - Games Workshop review candidates are intentionally excluded from the
-        first write test because they require manual identity review.
+    The original selector could cluster around one supplier/product type
+    (for example Testors paints). This version deliberately diversifies by:
+      - Lightspeed category path
+      - supplier
+      - image present / image absent
+      - web description present / absent
+      - reorder active / reorder suppressed
+      - inactive / DoNotOrder where otherwise eligible
+
+    Games Workshop review candidates remain excluded from the first controlled
+    write path because reused part numbers require manual identity review.
     """
     eligible = result[
         (result["migration_status"] == "READY")
@@ -121,41 +126,109 @@ def select_test_batch(result: pd.DataFrame, size: int = 8) -> pd.DataFrame:
     if eligible.empty:
         raise ValueError("No fully mapped READY products are available for a test batch.")
 
-    selected = []
-    used = set()
+    def txt_series(names):
+        for name in names:
+            if name in eligible.columns:
+                return eligible[name].fillna("").astype(str).str.strip()
+        return pd.Series("", index=eligible.index)
 
-    def take(mask, n):
-        nonlocal selected, used
-        subset = eligible[mask].copy()
-        for idx, row in subset.iterrows():
-            key = _text(row.get("RMS_ItemID")) or _text(row.get("RMS_SKU")) or str(idx)
-            if key in used:
-                continue
-            selected.append(row)
-            used.add(key)
-            if len([1 for _ in selected]) >= size:
-                return
-            n -= 1
-            if n <= 0:
-                return
-
-    suppressed = (
-        (pd.to_numeric(eligible.get("proposed_reorder_point", 0), errors="coerce").fillna(0) == 0)
-        & (pd.to_numeric(eligible.get("proposed_restock_level", 0), errors="coerce").fillna(0) == 0)
+    eligible["_sku"] = txt_series(["RMS_SKU", "ItemLookupCode", "SKU"])
+    eligible["_category"] = eligible.get(
+        "LS_Category_Path", pd.Series("", index=eligible.index)
+    ).fillna("").astype(str).str.strip()
+    eligible["_supplier"] = eligible.get(
+        "LS_Supplier", pd.Series("", index=eligible.index)
+    ).fillna("").astype(str).str.strip()
+    eligible["_picture"] = txt_series(["PictureName", "Picture", "RMS_Picture"])
+    eligible["_webdesc"] = txt_series(
+        ["Web Description", "RMS_WebDescription", "WebDescription"]
     )
-    inactive = eligible.get("Inactive", pd.Series(False, index=eligible.index)).astype(str).str.lower().isin(["1", "true", "yes"])
-    dno = eligible.get("DoNotOrder", pd.Series(False, index=eligible.index)).astype(str).str.lower().isin(["1", "true", "yes"])
 
-    take(inactive | dno, 1)
-    take(suppressed & ~(inactive | dno), 2)
-    take(~suppressed, 3)
-    take(pd.Series(True, index=eligible.index), size - len(selected))
+    rp = pd.to_numeric(
+        eligible.get("proposed_reorder_point", pd.Series(0, index=eligible.index)),
+        errors="coerce",
+    ).fillna(0)
+    rl = pd.to_numeric(
+        eligible.get("proposed_restock_level", pd.Series(0, index=eligible.index)),
+        errors="coerce",
+    ).fillna(0)
+    eligible["_reorder_suppressed"] = (rp == 0) & (rl == 0)
+    eligible["_inactive"] = eligible.get(
+        "Inactive", pd.Series(False, index=eligible.index)
+    ).astype(str).str.lower().isin(["1", "true", "yes", "y"])
+    eligible["_dno"] = eligible.get(
+        "DoNotOrder", pd.Series(False, index=eligible.index)
+    ).astype(str).str.lower().isin(["1", "true", "yes", "y"])
 
-    if not selected:
-        raise ValueError("Unable to select a test batch.")
+    # Prefer rows that add new coverage dimensions to the batch.
+    selected_idx = []
+    used_skus = set()
+    seen_categories = set()
+    seen_suppliers = set()
+    seen_image_state = set()
+    seen_webdesc_state = set()
+    seen_reorder_state = set()
+    seen_special_state = set()
 
-    return pd.DataFrame(selected).head(size).reset_index(drop=True)
+    remaining = list(eligible.index)
 
+    while remaining and len(selected_idx) < size:
+        best_idx = None
+        best_score = None
+
+        for idx in remaining:
+            row = eligible.loc[idx]
+            sku = str(row["_sku"]).strip()
+            if not sku or sku in used_skus:
+                continue
+
+            category = str(row["_category"]).strip().casefold()
+            supplier = str(row["_supplier"]).strip().casefold()
+            image_state = bool(str(row["_picture"]).strip())
+            webdesc_state = bool(str(row["_webdesc"]).strip())
+            reorder_state = bool(row["_reorder_suppressed"])
+            special_state = bool(row["_inactive"] or row["_dno"])
+
+            score = (
+                (6 if category and category not in seen_categories else 0)
+                + (4 if supplier and supplier not in seen_suppliers else 0)
+                + (3 if image_state not in seen_image_state else 0)
+                + (3 if webdesc_state not in seen_webdesc_state else 0)
+                + (2 if reorder_state not in seen_reorder_state else 0)
+                + (2 if special_state not in seen_special_state else 0)
+            )
+
+            # Deterministic tie-breaker keeps the test reproducible.
+            tie = (score, sku.casefold())
+            if best_score is None or tie > best_score:
+                best_score = tie
+                best_idx = idx
+
+        if best_idx is None:
+            break
+
+        row = eligible.loc[best_idx]
+        selected_idx.append(best_idx)
+        used_skus.add(str(row["_sku"]).strip())
+        seen_categories.add(str(row["_category"]).strip().casefold())
+        seen_suppliers.add(str(row["_supplier"]).strip().casefold())
+        seen_image_state.add(bool(str(row["_picture"]).strip()))
+        seen_webdesc_state.add(bool(str(row["_webdesc"]).strip()))
+        seen_reorder_state.add(bool(row["_reorder_suppressed"]))
+        seen_special_state.add(bool(row["_inactive"] or row["_dno"]))
+        remaining.remove(best_idx)
+
+    if not selected_idx:
+        raise ValueError("Unable to select a representative test batch.")
+
+    return (
+        eligible.loc[selected_idx]
+        .drop(columns=[
+            "_sku", "_category", "_supplier", "_picture", "_webdesc",
+            "_reorder_suppressed", "_inactive", "_dno"
+        ], errors="ignore")
+        .reset_index(drop=True)
+    )
 
 def build_standard_family_payload(
     row: pd.Series,
