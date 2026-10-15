@@ -59,12 +59,18 @@ def decide_product(
 
     gw = is_games_workshop(supplier_name, sku)
 
-    if quantity > 0:
+    has_reorder = (reorder_point or 0) > 0 or (restock_level or 0) > 0
+
+    # Primary catalog filter:
+    # If RMS has no stock and no reorder information, do not migrate the item.
+    # This applies regardless of active/inactive status or recent sales/receipts.
+    # Historical activity can still be reviewed separately from the migration
+    # analysis output, but it does not justify creating the product in Lightspeed.
+    if quantity <= 0 and not has_reorder:
+        migration_status = "EXCLUDE"
+    elif quantity > 0:
         migration_status = "READY"
     elif inactive:
-        # Zero-stock inactive products should never auto-migrate just because
-        # they had recent history. Recent activity makes them REVIEW candidates;
-        # stale inactive records can be left behind.
         recent_sale = sale_reliable and sale_age is not None and sale_age <= 12
         recent_receipt = receipt_age is not None and receipt_age <= 12
         migration_status = "REVIEW" if (recent_sale or recent_receipt) else "EXCLUDE"
@@ -89,7 +95,9 @@ def decide_product(
 
     reason = ""
 
-    if gw:
+    if quantity <= 0 and not has_reorder:
+        reason = "Zero stock and no reorder information - do not migrate"
+    elif gw:
         migration_status = "REVIEW" if migration_status != "EXCLUDE" else migration_status
         reason = "Games Workshop - verify current product/description and reused part number"
     elif inactive and quantity <= 0 and migration_status == "REVIEW":
