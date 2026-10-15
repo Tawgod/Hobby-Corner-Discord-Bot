@@ -61,6 +61,13 @@ def decide_product(
 
     if quantity > 0:
         migration_status = "READY"
+    elif inactive:
+        # Zero-stock inactive products should never auto-migrate just because
+        # they had recent history. Recent activity makes them REVIEW candidates;
+        # stale inactive records can be left behind.
+        recent_sale = sale_reliable and sale_age is not None and sale_age <= 12
+        recent_receipt = receipt_age is not None and receipt_age <= 12
+        migration_status = "REVIEW" if (recent_sale or recent_receipt) else "EXCLUDE"
     elif sale_reliable and sale_age is not None and sale_age <= 12:
         migration_status = "READY"
     elif receipt_age is not None and receipt_age <= 12:
@@ -85,6 +92,10 @@ def decide_product(
     if gw:
         migration_status = "REVIEW" if migration_status != "EXCLUDE" else migration_status
         reason = "Games Workshop - verify current product/description and reused part number"
+    elif inactive and quantity <= 0 and migration_status == "REVIEW":
+        reason = "Inactive and zero stock with recent activity - review before migration"
+    elif inactive and quantity <= 0 and migration_status == "EXCLUDE":
+        reason = "Inactive and zero stock with no recent activity"
     elif inactive and quantity > 0:
         reason = "Inactive but RMS shows stock - migrate product, no reorder"
     elif do_not_order and quantity > 0:
