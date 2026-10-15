@@ -144,6 +144,11 @@ def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
         ["Web Description", "RMS_WebDescription", "WebDescription"]
     )
 
+    # Guarantee web-description coverage in controlled previews when the source
+    # contains any eligible products with a web description. This gives us a
+    # direct test that Web Description becomes the Lightspeed family name.
+    webdesc_candidates = eligible[eligible["_webdesc"].astype(str).str.strip() != ""]
+
     rp = pd.to_numeric(
         eligible.get("proposed_reorder_point", pd.Series(0, index=eligible.index)),
         errors="coerce",
@@ -171,6 +176,22 @@ def select_test_batch(result: pd.DataFrame, size: int = 12) -> pd.DataFrame:
     seen_special_state = set()
 
     remaining = list(eligible.index)
+
+    if size > 0 and not webdesc_candidates.empty:
+        first_web_idx = sorted(
+            webdesc_candidates.index,
+            key=lambda idx: str(webdesc_candidates.loc[idx, "_sku"]).casefold(),
+        )[0]
+        row = eligible.loc[first_web_idx]
+        selected_idx.append(first_web_idx)
+        used_skus.add(str(row["_sku"]).strip())
+        seen_categories.add(str(row["_category"]).strip().casefold())
+        seen_suppliers.add(str(row["_supplier"]).strip().casefold())
+        seen_image_state.add(bool(str(row["_picture"]).strip()))
+        seen_webdesc_state.add(True)
+        seen_reorder_state.add(bool(row["_reorder_suppressed"]))
+        seen_special_state.add(bool(row["_inactive"] or row["_dno"]))
+        remaining.remove(first_web_idx)
 
     while remaining and len(selected_idx) < size:
         best_idx = None
