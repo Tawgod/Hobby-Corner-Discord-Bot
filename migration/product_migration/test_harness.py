@@ -870,7 +870,7 @@ def repair_test_batch_images(
             out["Review Flags"] = ",".join(quality.get("review_flags") or [])
 
             # Retail's visible standard-product image is family-level.
-            family_id = _text(created_row.get("Family ID"))
+            family_id = _text(row.get("Family ID"))
             if not family_id:
                 raise RuntimeError("Missing Family ID for image repair.")
 
