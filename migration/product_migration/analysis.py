@@ -370,7 +370,10 @@ def analyze_candidates(
             fallback_applied = True
 
         result["LS_Category_Path"] = category_path
-        result["Category_Mapped"] = bool(category_path)
+        # A display fallback such as "General > No Category" is not an
+        # approved RMS->Lightspeed mapping. Keep it visible as the proposed
+        # destination, but do not let it satisfy the mapped/write gate.
+        result["Category_Mapped"] = bool(cat and cat.get("path"))
         result["Category_Fallback_Applied"] = fallback_applied
         result["Category_Fallback_Needs_Create"] = False
         result["Category_Intentionally_Excluded"] = intentional_category_exclusion
@@ -391,12 +394,21 @@ def analyze_candidates(
         supplier = supplier_map.get(primary_supplier_key, "")
         result["Supplier_Fallback_Applied"] = False
         result["LS_Supplier"] = supplier
-        result["Supplier_Mapped"] = bool(supplier)
+        # A blank RMS primary supplier remains unresolved even when the review
+        # mapping proposes "Other". It must be explicitly reviewed.
+        result["Supplier_Mapped"] = bool(supplier) and bool(primary_supplier_key)
 
         mapping_reasons = []
-        if not category_path and not intentional_category_exclusion:
+        if fallback_applied and not intentional_category_exclusion:
+            mapping_reasons.append(
+                "Unmapped category - proposed fallback is General > No Category"
+            )
+        elif not result["Category_Mapped"] and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
-        if not supplier:
+
+        if not primary_supplier_key:
+            mapping_reasons.append("Blank RMS supplier")
+        elif not supplier:
             mapping_reasons.append("Unmapped supplier")
 
         identity_flags = source_identity_review_flags(row)
