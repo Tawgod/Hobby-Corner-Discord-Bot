@@ -160,8 +160,9 @@ def resolve_category_uuids_from_api(
             for part in category_path
             if isinstance(part, dict) and _text(part.get("name"))
         ]
-        if not names and _text(item.get("name")):
-            names = [_text(item.get("name"))]
+        own_name = _text(item.get("name"))
+        if own_name and (not names or _norm(names[-1]) != _norm(own_name)):
+            names.append(own_name)
         return " > ".join(names)
 
     wanted = {
