@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -619,22 +620,25 @@ def resolve_supplier_uuids_from_api(
     return out, resolved, unresolved
 
 
-def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Optional[Iterable[str]] = None) -> pd.DataFrame:
+def select_test_batch(
+    result: pd.DataFrame,
+    size: int = 12,
+    exclude_skus: Optional[Iterable[str]] = None,
+    random_seed: Optional[int] = None,
+) -> pd.DataFrame:
     """
-    Pick a representative, fully mapped READY batch.
+    Pick a varied, representative, fully mapped READY batch.
 
-    The original selector could cluster around one supplier/product type
-    (for example Testors paints). This version deliberately diversifies by:
-      - Lightspeed category path
-      - supplier
-      - image present / image absent
-      - web description present / absent
-      - reorder active / reorder suppressed
-      - inactive / DoNotOrder where otherwise eligible
+    Coverage is still prioritized across category, supplier, image state,
+    web-description state, reorder state, and inactive/DoNotOrder state, but
+    equally useful candidates are randomized so repeated dry runs do not keep
+    returning the same SKUs.
 
-    Games Workshop review candidates remain excluded from the first controlled
-    write path because reused part numbers require manual identity review.
+    Pass random_seed only when a reproducible diagnostic batch is desired.
     """
+    if size <= 0:
+        raise ValueError("Test batch size must be greater than zero.")
+
     eligible = result[
         (result["migration_status"] == "READY")
         & result["Category_Mapped"].astype(bool)
@@ -648,7 +652,9 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
     }
 
     if eligible.empty:
-        raise ValueError("No new fully mapped READY products are available for a test batch after excluding prior test SKUs.")
+        raise ValueError(
+            "No fully mapped READY products are available for a test batch."
+        )
 
     def txt_series(names):
         for name in names:
@@ -661,6 +667,12 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
         eligible = eligible[
             ~eligible["_sku"].astype(str).str.strip().str.casefold().isin(excluded)
         ].copy()
+
+    if eligible.empty:
+        raise ValueError(
+            "No new fully mapped READY products are available after excluding prior live-test SKUs."
+        )
+
     eligible["_category"] = eligible.get(
         "LS_Category_Path", pd.Series("", index=eligible.index)
     ).fillna("").astype(str).str.strip()
@@ -671,11 +683,6 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
     eligible["_webdesc"] = txt_series(
         ["Web Description", "RMS_WebDescription", "WebDescription"]
     )
-
-    # Guarantee web-description coverage in controlled previews when the source
-    # contains any eligible products with a web description. This gives us a
-    # direct test that Web Description becomes the Lightspeed family name.
-    webdesc_candidates = eligible[eligible["_webdesc"].astype(str).str.strip() != ""]
 
     rp = pd.to_numeric(
         eligible.get("proposed_reorder_point", pd.Series(0, index=eligible.index)),
@@ -693,7 +700,8 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
         "DoNotOrder", pd.Series(False, index=eligible.index)
     ).astype(str).str.lower().isin(["1", "true", "yes", "y"])
 
-    # Prefer rows that add new coverage dimensions to the batch.
+    rng = random.Random(random_seed) if random_seed is not None else random.SystemRandom()
+
     selected_idx = []
     used_skus = set()
     seen_categories = set()
@@ -705,11 +713,14 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
 
     remaining = list(eligible.index)
 
-    if size > 0 and not webdesc_candidates.empty:
-        first_web_idx = sorted(
-            webdesc_candidates.index,
-            key=lambda idx: str(webdesc_candidates.loc[idx, "_sku"]).casefold(),
-        )[0]
+    # Make sure at least one expanded Web Description is represented when
+    # available, but choose a different qualifying row between ordinary runs.
+    webdesc_candidates = [
+        idx for idx in remaining
+        if str(eligible.loc[idx, "_webdesc"]).strip()
+    ]
+    if size > 0 and webdesc_candidates:
+        first_web_idx = rng.choice(webdesc_candidates)
         row = eligible.loc[first_web_idx]
         selected_idx.append(first_web_idx)
         used_skus.add(str(row["_sku"]).strip())
@@ -722,7 +733,7 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
         remaining.remove(first_web_idx)
 
     while remaining and len(selected_idx) < size:
-        best_idx = None
+        scored = []
         best_score = None
 
         for idx in remaining:
@@ -747,15 +758,16 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
                 + (2 if special_state not in seen_special_state else 0)
             )
 
-            # Deterministic tie-breaker keeps the test reproducible.
-            tie = (score, sku.casefold())
-            if best_score is None or tie > best_score:
-                best_score = tie
-                best_idx = idx
+            if best_score is None or score > best_score:
+                best_score = score
+                scored = [idx]
+            elif score == best_score:
+                scored.append(idx)
 
-        if best_idx is None:
+        if not scored:
             break
 
+        best_idx = rng.choice(scored)
         row = eligible.loc[best_idx]
         selected_idx.append(best_idx)
         used_skus.add(str(row["_sku"]).strip())
@@ -778,6 +790,7 @@ def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Option
         ], errors="ignore")
         .reset_index(drop=True)
     )
+
 
 def build_standard_family_payload(
     row: pd.Series,
@@ -1451,21 +1464,17 @@ def execute_controlled_batch(
     max_writes: int = 20,
 ) -> pd.DataFrame:
     """
-    Execute a deliberately small test batch and return one result row per item.
+    Execute the configured test batch and return one result row per item.
 
-    max_writes is a hard guardrail; raise instead of silently processing more.
+    max_writes is the explicit user-configured guardrail.
     """
-    absolute_limit = 20
-    if max_writes > absolute_limit:
-        raise ValueError(
-            f"Configured product-write limit {max_writes} exceeds the absolute controlled-test cap of {absolute_limit}."
-        )
+    if max_writes <= 0:
+        raise ValueError("Configured product-write limit must be greater than zero.")
     if len(payloads) != len(preview):
         raise ValueError("Preview/payload row counts do not match.")
-    if len(payloads) > absolute_limit or len(payloads) > max_writes:
+    if len(payloads) > max_writes:
         raise ValueError(
-            f"Controlled test contains {len(payloads)} products; "
-            f"configured limit is {max_writes} and absolute cap is {absolute_limit}."
+            f"Controlled test contains {len(payloads)} products; configured limit is {max_writes}."
         )
 
     results = []
@@ -1764,15 +1773,11 @@ def apply_controlled_reorder_batch(
       - Reorder Point Proposed
       - Restock Level Proposed
     """
-    absolute_limit = 20
-    if max_writes > absolute_limit:
+    if max_writes <= 0:
+        raise ValueError("Configured reorder-write limit must be greater than zero.")
+    if len(rows) > max_writes:
         raise ValueError(
-            f"Configured reorder-write limit {max_writes} exceeds the absolute controlled-test cap of {absolute_limit}."
-        )
-    if len(rows) > absolute_limit or len(rows) > max_writes:
-        raise ValueError(
-            f"Controlled reorder test contains {len(rows)} rows; "
-            f"configured limit is {max_writes} and absolute cap is {absolute_limit}."
+            f"Controlled reorder test contains {len(rows)} rows; configured limit is {max_writes}."
         )
 
     out = []
