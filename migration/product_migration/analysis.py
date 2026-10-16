@@ -310,10 +310,17 @@ def build_category_map(df: pd.DataFrame) -> dict[tuple[str, str], dict]:
             if text:
                 levels.append(text)
 
-        mapping[key] = {
+        entry = {
             "levels": levels,
             "path": " > ".join(levels),
         }
+        if key in mapping and norm(mapping[key].get("path")) != norm(entry.get("path")):
+            raise ValueError(
+                "Conflicting category mapping rows for "
+                f"department={dept!r}, category={cat!r}: "
+                f"{mapping[key].get('path')!r} vs {entry.get('path')!r}"
+            )
+        mapping[key] = entry
 
     return mapping
 
@@ -349,6 +356,11 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
         if norm(target) == "other" and source and not disposition:
             continue
 
+        if source in out and norm(out[source]) != norm(target):
+            raise ValueError(
+                f"Conflicting supplier mapping rows for {source_raw!r}: "
+                f"{out[source]!r} vs {target!r}"
+            )
         out[source] = target
     return out
 
