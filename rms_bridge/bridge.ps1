@@ -149,7 +149,7 @@ FROM Item I
 LEFT JOIN Department D ON D.ID = I.DepartmentID
 LEFT JOIN Category C ON C.ID = I.CategoryID
 LEFT JOIN Supplier S ON S.ID = I.SupplierID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.ID
+LEFT JOIN dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.ID
 OUTER APPLY (
     SELECT TOP 1
         SL.ReorderNumber,
@@ -411,20 +411,29 @@ ORDER BY C.ORDINAL_POSITION;
 
   "product-web-diagnostic" {
     $q = @"
-SELECT TOP 50
+SELECT TOP 100
     I.ID,
     I.ItemLookupCode,
     I.Description,
     I.ExtendedDescription,
     I.Content,
     I.PictureName,
+    LPAM.WebDescription AS LocalPAM_WebDescription,
+    LPAM.DBTimestamp AS LocalPAM_DBTimestamp,
+    HPAM.WebDescription AS HQPAM_WebDescription,
+    HPAM.DBTimestamp AS HQPAM_DBTimestamp,
     WI.*
 FROM Item I
+LEFT JOIN dbo.nitroasl_pamtable LPAM
+  ON LPAM.ItemID = I.ID
+LEFT JOIN HQcorp.dbo.nitroasl_pamtable HPAM
+  ON HPAM.ItemID = I.ID
 LEFT JOIN WebLinK_item WI
   ON WI.id = I.ID
 WHERE I.ItemLookupCode IN (
-    'DOW7201','TES1133TT','TES1162TT','BSI-117','ULP81126','ULP81156',
-    'TES1103TT','TES1104TT','TES1108TT','TES1110TT','TES1111TT','TES1112TT'
+    'GW48-111','WZK96383','DOW7201','TES1133TT','TES1162TT','BSI-117',
+    'ULP81126','ULP81156','TES1103TT','TES1104TT','TES1108TT',
+    'TES1110TT','TES1111TT','TES1112TT'
 )
 ORDER BY I.ItemLookupCode;
 "@
@@ -503,7 +512,7 @@ ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
     Write-Host "UPC/aliases source: Alias"
     Write-Host "Supplier item code source: SupplierList.ReorderNumber"
     Write-Host "Supplier code source: Supplier.Code"
-    Write-Host "Web description source: HQcorp.dbo.nitroasl_pamtable.WebDescription"
+    Write-Host "Web description source: local dbo.nitroasl_pamtable.WebDescription"
   }
 
   "customers-preview" {
