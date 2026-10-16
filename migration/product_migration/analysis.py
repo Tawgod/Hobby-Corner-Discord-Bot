@@ -346,10 +346,57 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
     return out
 
 
+def resolve_category_by_catalog_name(
+    rms_category,
+    category_catalog_paths: Optional[Iterable[str]],
+) -> str:
+    """
+    Recover a Lightspeed category from the RMS category name when PAM/RMS has
+    the wrong department. Only return a destination when the category name
+    resolves uniquely across the Lightspeed category catalog.
+
+    Exact segment matches win. A unique prefix match is allowed for compact RMS
+    names such as "3D" -> "3D Puzzles".
+    """
+    cat = norm(rms_category)
+    if not cat or not category_catalog_paths:
+        return ""
+
+    exact = []
+    prefix = []
+    for raw_path in category_catalog_paths:
+        path = str(raw_path).strip()
+        if not path:
+            continue
+        segments = [seg.strip() for seg in path.split(">") if seg.strip()]
+        for seg in segments:
+            nseg = norm(seg)
+            if nseg == cat:
+                exact.append(path)
+                break
+            if (
+                len(cat) >= 2
+                and (nseg.startswith(cat + " ") or cat.startswith(nseg + " "))
+            ):
+                prefix.append(path)
+                break
+
+    exact_unique = list(dict.fromkeys(exact))
+    if len(exact_unique) == 1:
+        return exact_unique[0]
+
+    prefix_unique = list(dict.fromkeys(prefix))
+    if not exact_unique and len(prefix_unique) == 1:
+        return prefix_unique[0]
+
+    return ""
+
+
 def analyze_candidates(
     candidates: pd.DataFrame,
     category_map: dict,
     supplier_map: dict,
+    category_catalog_paths: Optional[Iterable[str]] = None,
 ) -> pd.DataFrame:
     rows = []
 
@@ -379,21 +426,28 @@ def analyze_candidates(
         )
 
         category_path = cat["path"] if cat else ""
+        category_name_recovered = False
         fallback_applied = False
 
-        # Any classification that is not explicitly mapped goes to the
-        # dedicated review bucket. This includes no department, blank category,
-        # or a nonblank department/category pair missing from Mapping.
-        # Intentionally excluded legacy/system categories remain EXCLUDE.
+        # If PAM/RMS moved a category without its department, recover by the
+        # category name only when it identifies one unique Lightspeed path.
+        if not intentional_category_exclusion and not category_path:
+            recovered_path = resolve_category_by_catalog_name(
+                rms_category, category_catalog_paths
+            )
+            if recovered_path:
+                category_path = recovered_path
+                category_name_recovered = True
+
         if not intentional_category_exclusion and not category_path:
             category_path = "General > No Category"
             fallback_applied = True
 
         result["LS_Category_Path"] = category_path
-        # A display fallback such as "General > No Category" is not an
-        # approved RMS->Lightspeed mapping. Keep it visible as the proposed
-        # destination, but do not let it satisfy the mapped/write gate.
-        result["Category_Mapped"] = bool(cat and cat.get("path"))
+        result["Category_Mapped"] = bool(
+            (cat and cat.get("path")) or category_name_recovered
+        )
+        result["Category_Name_Recovered"] = category_name_recovered
         result["Category_Fallback_Applied"] = fallback_applied
         result["Category_Fallback_Needs_Create"] = False
         result["Category_Intentionally_Excluded"] = intentional_category_exclusion
@@ -471,7 +525,7 @@ def analyze_candidates(
 
         # Critical cutover rule: RMS quantity must never become Lightspeed opening stock.
         result["Opening_Inventory_To_Import"] = 0
-        result["Migration_Tags"] = "Aging Stock" if bool(result.get("aging_stock")) else ""
+        result["Migration_Flags"] = "Aging Stock" if bool(result.get("aging_stock")) else ""
 
         rows.append(result)
 
