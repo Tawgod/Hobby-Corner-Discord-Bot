@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter, defaultdict
 from dataclasses import asdict
 from typing import Iterable, Optional
 
@@ -126,6 +127,50 @@ def find_supplier_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[st
     )
 
 
+def build_department_lv1_map(category_map: dict[tuple[str, str], dict]) -> dict[str, str]:
+    """
+    Infer the Lightspeed Level-1 parent for each RMS department from the
+    authoritative mapping table.
+
+    Preference order:
+      1. unique LV1 used by the department;
+      2. an LV1 whose normalized name matches the RMS department;
+      3. the most frequently used LV1, but only when there is a single winner.
+
+    Ambiguous ties are left unresolved rather than guessed.
+    """
+    roots_by_department: dict[str, list[str]] = defaultdict(list)
+    for (dept_key, _cat_key), mapped in category_map.items():
+        if not dept_key:
+            continue
+        levels = mapped.get("levels") or []
+        if levels:
+            roots_by_department[dept_key].append(str(levels[0]).strip())
+
+    out: dict[str, str] = {}
+    for dept_key, roots in roots_by_department.items():
+        roots = [x for x in roots if x]
+        if not roots:
+            continue
+        normalized_unique = {}
+        for root in roots:
+            normalized_unique.setdefault(norm(root), root)
+        if len(normalized_unique) == 1:
+            out[dept_key] = next(iter(normalized_unique.values()))
+            continue
+        if dept_key in normalized_unique:
+            out[dept_key] = normalized_unique[dept_key]
+            continue
+
+        counts = Counter(norm(root) for root in roots)
+        top_count = max(counts.values())
+        winners = [key for key, count in counts.items() if count == top_count]
+        if len(winners) == 1:
+            out[dept_key] = normalized_unique[winners[0]]
+
+    return out
+
+
 def build_category_map(df: pd.DataFrame) -> dict[tuple[str, str], dict]:
     # Google Sheets can contain duplicate visible headers (for example several
     # columns all named "LS Level3"). Access by positional index so pandas does
@@ -200,6 +245,7 @@ def analyze_candidates(
     supplier_map: dict,
 ) -> pd.DataFrame:
     rows = []
+    department_lv1_map = build_department_lv1_map(category_map)
 
     for _, row in candidates.iterrows():
         decision = decide_product(
@@ -217,13 +263,43 @@ def analyze_candidates(
         result = dict(row)
         result.update(asdict(decision))
 
-        cat_key = (norm(row.get("RMS_Department")), norm(row.get("RMS_Category")))
+        rms_department = row.get("RMS_Department")
+        rms_category = row.get("RMS_Category")
+        dept_key = norm(rms_department)
+        cat_key = (dept_key, norm(rms_category))
         cat = category_map.get(cat_key)
         intentional_category_exclusion = is_intentional_category_exclusion(
-            row.get("RMS_Department"), row.get("RMS_Category")
+            rms_department, rms_category
         )
-        result["LS_Category_Path"] = cat["path"] if cat else ""
-        result["Category_Mapped"] = bool(cat)
+
+        category_path = cat["path"] if cat else ""
+        fallback_applied = False
+        fallback_needs_creation = False
+
+        # Migration fallback rules:
+        # - no RMS department -> General > No Category
+        # - RMS department present but RMS category blank -> Other <mapped LV1>
+        # Nonblank unmapped RMS categories remain REVIEW and are never silently
+        # collapsed into a fallback category.
+        if not intentional_category_exclusion and not dept_key:
+            category_path = "General > No Category"
+            fallback_applied = True
+        elif (
+            not intentional_category_exclusion
+            and dept_key
+            and not norm(rms_category)
+            and not cat
+        ):
+            lv1 = department_lv1_map.get(dept_key, "")
+            if lv1:
+                category_path = f"{lv1} > Other {lv1}"
+                fallback_applied = True
+                fallback_needs_creation = True
+
+        result["LS_Category_Path"] = category_path
+        result["Category_Mapped"] = bool(category_path)
+        result["Category_Fallback_Applied"] = fallback_applied
+        result["Category_Fallback_Needs_Create"] = fallback_needs_creation
         result["Category_Intentionally_Excluded"] = intentional_category_exclusion
 
         if intentional_category_exclusion:
@@ -246,7 +322,7 @@ def analyze_candidates(
         result["Supplier_Mapped"] = bool(supplier)
 
         mapping_reasons = []
-        if not cat and not intentional_category_exclusion:
+        if not category_path and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
         # Unmapped primary suppliers are intentionally redirected to the
         # canonical Lightspeed "Other" supplier so they do not block migration.
