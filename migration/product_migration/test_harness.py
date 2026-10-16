@@ -139,7 +139,13 @@ def build_category_uuid_map(cat_id_df: pd.DataFrame) -> Dict[str, str]:
                     levels.append(val)
         uid = _text(row.get("UUID"))
         if levels and uid:
-            out[_norm(" > ".join(levels))] = uid
+            key = _norm(" > ".join(levels))
+            if key in out and out[key] != uid:
+                raise ValueError(
+                    f"Conflicting Cat ID UUIDs for {' > '.join(levels)!r}: "
+                    f"{out[key]!r} vs {uid!r}"
+                )
+            out[key] = uid
     return out
 
 
@@ -152,7 +158,13 @@ def build_brand_uuid_map(brand_id_df: pd.DataFrame) -> Dict[str, str]:
         name = _text(row.get("Brand Name"))
         uid = _text(row.get("Brand UUID"))
         if name and uid:
-            out[_norm(name)] = uid
+            key = _norm(name)
+            if key in out and out[key] != uid:
+                raise ValueError(
+                    f"Conflicting Brand ID Map UUIDs for {name!r}: "
+                    f"{out[key]!r} vs {uid!r}"
+                )
+            out[key] = uid
     return out
 
 
@@ -165,7 +177,13 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
         name = _text(row.get("Supplier Name"))
         uid = _text(row.get("Supplier UUID"))
         if name and uid:
-            out[_norm(name)] = uid
+            key = _norm(name)
+            if key in out and out[key] != uid:
+                raise ValueError(
+                    f"Conflicting Supplier ID Map UUIDs for {name!r}: "
+                    f"{out[key]!r} vs {uid!r}"
+                )
+            out[key] = uid
     return out
 
 
