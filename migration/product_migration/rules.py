@@ -11,6 +11,7 @@ class ProductDecision:
     proposed_reorder_point: float
     proposed_restock_level: float
     review_reason: str
+    aging_stock: bool
 
 
 def _months_old(dt: Optional[datetime], now: datetime) -> Optional[float]:
@@ -57,8 +58,6 @@ def decide_product(
     sale_age = _months_old(last_sold, now) if sale_reliable else None
     receipt_age = _months_old(last_received, now)
 
-    gw = is_games_workshop(supplier_name, sku)
-
     has_reorder = (reorder_point or 0) > 0 or (restock_level or 0) > 0
 
     # Primary catalog filter:
@@ -95,11 +94,16 @@ def decide_product(
 
     reason = ""
 
+    aging_stock = bool(
+        quantity > 0
+        and (
+            not sale_reliable
+            or (sale_age is not None and sale_age > 12)
+        )
+    )
+
     if quantity <= 0 and not has_reorder:
         reason = "Zero stock and no reorder information - do not migrate"
-    elif gw:
-        migration_status = "REVIEW" if migration_status != "EXCLUDE" else migration_status
-        reason = "Games Workshop - verify current product/description and reused part number"
     elif inactive and quantity <= 0 and migration_status == "REVIEW":
         reason = "Inactive and zero stock with recent activity - review before migration"
     elif inactive and quantity <= 0 and migration_status == "EXCLUDE":
@@ -112,7 +116,7 @@ def decide_product(
         not sale_reliable or (sale_age is not None and sale_age > 12)
     ):
         reason = "Recent receipt but aging/no reliable sales history"
-    elif quantity > 0 and (not sale_reliable or (sale_age is not None and sale_age > 24)):
+    elif aging_stock:
         reason = "Aging stock - migrate product for physical inventory"
     elif quantity <= 0 and (not sale_reliable or (sale_age is not None and sale_age > 24)):
         reason = "Old zero-stock product"
@@ -122,4 +126,5 @@ def decide_product(
         proposed_reorder_point=float(proposed_reorder_point),
         proposed_restock_level=float(proposed_restock_level),
         review_reason=reason,
+        aging_stock=aging_stock,
     )
