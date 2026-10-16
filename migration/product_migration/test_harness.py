@@ -575,6 +575,7 @@ def build_standard_family_payload(
         "RetailPrice", "Retail Price", "Price", "RMS_RetailPrice", "RMS_Price"
     ]))
     cost = _decimal_string(_first_existing(row, [
+        "RMS_SupplierListCost", "SupplierListCost",
         "LastCost", "Cost", "RMS_Cost", "supply_price", "Supply Price"
     ]))
     description = _text(_first_existing(row, [
@@ -608,8 +609,9 @@ def build_standard_family_payload(
         product["measurements"] = {"weight": float(weight), "weight_unit": weight_unit}
 
     if retail is not None:
-        # Hobby Corner currently uses tax-inclusive retail pricing in the source
-        # migration data; this can be flipped centrally if store config requires.
+        # Controlled Lightspeed creates have accepted Hobby Corner's RMS RetailPrice
+        # as the store's tax-exclusive sell price. The 2026-10 API permits only the
+        # store-appropriate including- or excluding-tax field.
         product["prices"] = {"price_excluding_tax": retail}
 
     if supplier_id:
@@ -922,7 +924,16 @@ def execute_controlled_product_write(
         "Status": "PENDING",
         "Family ID": "",
         "Product ID": "",
+        "Name Verified": False,
         "Description Verified": False,
+        "Category Verified": False,
+        "Brand Verified": False,
+        "Codes Verified": False,
+        "Supplier Verified": False,
+        "Price Verified": False,
+        "Weight Verified": False,
+        "Active Verified": False,
+        "Product Fields Verified": False,
         "Image Requested": bool(picture_path),
         "Image Uploaded": False,
         "Image Verified": False,
@@ -1022,11 +1033,116 @@ def execute_controlled_product_write(
             )
 
         family_data = family_read.json().get("data") or {}
+        expected_name = _text(payload.get("name"))
         expected_description = _text(payload.get("description"))
-        actual_description = _text(family_data.get("description"))
+        expected_category = _text(payload.get("category_id"))
+        expected_brand = _text(payload.get("brand_id"))
+
+        result["Name Verified"] = _text(family_data.get("name")) == expected_name
         result["Description Verified"] = (
-            not expected_description or actual_description == expected_description
+            not expected_description
+            or _text(family_data.get("description")) == expected_description
         )
+        result["Category Verified"] = (
+            _text(family_data.get("category_id")) == expected_category
+        )
+        result["Brand Verified"] = (
+            _text(family_data.get("brand_id")) == expected_brand
+        )
+
+        product_read = requests.get(
+            f"{base_host}/api/2026-10/products/{product_id}",
+            headers=headers,
+            timeout=timeout,
+        )
+        if not product_read.ok:
+            raise RuntimeError(
+                f"Product verify failed {product_read.status_code}: {product_read.text[:1000]}"
+            )
+        product_data = product_read.json().get("data") or {}
+        expected_product = products[0]
+
+        expected_codes = {
+            (_text(x.get("type")).upper(), _text(x.get("code")))
+            for x in (expected_product.get("codes") or [])
+            if _text(x.get("code"))
+        }
+        actual_codes = {
+            (_text(x.get("type")).upper(), _text(x.get("code")))
+            for x in (product_data.get("codes") or [])
+            if isinstance(x, dict) and _text(x.get("code"))
+        }
+        result["Codes Verified"] = expected_codes == actual_codes
+
+        def decimal_equal(left: Any, right: Any) -> bool:
+            if left is None or _text(left) == "":
+                return right is None or _text(right) == ""
+            try:
+                return Decimal(str(left)) == Decimal(str(right))
+            except (InvalidOperation, ValueError):
+                return _text(left) == _text(right)
+
+        expected_suppliers = expected_product.get("suppliers") or []
+        actual_suppliers = product_data.get("suppliers") or []
+        if expected_suppliers:
+            exp = expected_suppliers[0]
+            matching = [
+                x for x in actual_suppliers
+                if isinstance(x, dict)
+                and _text(x.get("supplier_id")) == _text(exp.get("supplier_id"))
+                and _text(x.get("code")) == _text(exp.get("code"))
+                and decimal_equal(x.get("price"), exp.get("price"))
+            ]
+            result["Supplier Verified"] = bool(matching)
+        else:
+            result["Supplier Verified"] = not actual_suppliers
+
+        expected_prices = expected_product.get("prices") or {}
+        if expected_prices:
+            actual_prices = product_data.get("prices") or {}
+            result["Price Verified"] = all(
+                decimal_equal(actual_prices.get(key), value)
+                for key, value in expected_prices.items()
+            )
+        else:
+            result["Price Verified"] = True
+
+        expected_measurements = expected_product.get("measurements") or {}
+        if expected_measurements:
+            actual_measurements = product_data.get("measurements") or {}
+            expected_weight = expected_measurements.get("weight")
+            actual_weight = actual_measurements.get("weight")
+            weight_matches = (
+                abs(float(actual_weight) - float(expected_weight)) < 1e-9
+                if actual_weight is not None and expected_weight is not None
+                else actual_weight == expected_weight
+            )
+            result["Weight Verified"] = (
+                weight_matches
+                and _text(actual_measurements.get("weight_unit")).upper()
+                == _text(expected_measurements.get("weight_unit")).upper()
+            )
+        else:
+            result["Weight Verified"] = True
+
+        expected_active = expected_product.get("active") or {}
+        actual_active = product_data.get("active") or {}
+        result["Active Verified"] = all(
+            bool(actual_active.get(key)) == bool(value)
+            for key, value in expected_active.items()
+        )
+
+        result["Product Fields Verified"] = all([
+            result["Name Verified"],
+            result["Description Verified"],
+            result["Category Verified"],
+            result["Brand Verified"],
+            result["Codes Verified"],
+            result["Supplier Verified"],
+            result["Price Verified"],
+            result["Weight Verified"],
+            result["Active Verified"],
+        ])
 
         # Standard-product catalog images belong on the family. Product-level
         # images are variant/member images and may not appear in the Retail UI.
@@ -1034,9 +1150,25 @@ def execute_controlled_product_write(
         result["Image Verified"] = bool(images) if picture_path else False
 
         result["Status"] = "CREATED"
-        if expected_description and not result["Description Verified"]:
+        verification_failures = [
+            label for label, ok in [
+                ("name", result["Name Verified"]),
+                ("description", result["Description Verified"]),
+                ("category", result["Category Verified"]),
+                ("brand", result["Brand Verified"]),
+                ("codes", result["Codes Verified"]),
+                ("supplier", result["Supplier Verified"]),
+                ("price", result["Price Verified"]),
+                ("weight", result["Weight Verified"]),
+                ("active", result["Active Verified"]),
+            ]
+            if not ok
+        ]
+        if verification_failures:
             result["Status"] = "ERROR"
-            result["Error"] = "Description did not match on read-back."
+            result["Error"] = (
+                "Read-back mismatch: " + ", ".join(verification_failures)
+            )
         if picture_path and not result["Image Verified"]:
             result["Status"] = "ERROR"
             result["Error"] = (
