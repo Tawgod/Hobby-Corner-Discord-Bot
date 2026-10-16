@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v50`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v51`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -229,3 +229,12 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Aging inventory with positive RMS quantity and no reliable sale within 12 months receives the migration tag `Aging Stock`. This is not itself a review flag.
 - The `Aging Stock` Lightspeed tag is resolved/created only if a selected live-write product actually needs it, and its tag ID is sent in the product create payload.
 - Added explicit category mappings for blank-category `Outdoor Toys -> Toys > Outdoor Toys` and `Other > Clothing -> General > Clothing`.
+
+
+## Migration private flags and category recovery
+
+- Migration annotations are stored in a hidden product custom field named `migration_flags`, not in Lightspeed item tags.
+- The custom field is created as a hidden product string field and currently records values such as `Aging Stock`, `Missing Picture`, and `Picture Replacement Needed`.
+- Aging/picture annotations do not by themselves block migration or move products to REVIEW.
+- When an exact RMS Department + Category mapping is absent, the analyzer may recover by RMS category name against the Lightspeed category catalog only when that category resolves to one unique destination. Exact segment matches win; unique compact-prefix matches such as `3D -> 3D Puzzles` are permitted.
+- The RMS bridge now reads WebDescription from the local `dbo.nitroasl_pamtable` belonging to the connected Item database, rather than the cross-database `HQcorp` PAM table. The product-web diagnostic compares local PAM and HQcorp PAM for known problem SKUs including `GW48-111`.
