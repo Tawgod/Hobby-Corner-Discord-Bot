@@ -180,12 +180,19 @@ def resolve_category_uuids_from_api(
 
     by_path: Dict[str, List[Dict[str, Any]]] = {}
     roots_by_name: Dict[str, List[Dict[str, Any]]] = {}
+    children_by_parent_and_name: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for item in categories:
         path = path_for(item)
         if path:
             by_path.setdefault(_norm(path), []).append(item)
-        if not item.get("parent_category_id") and _text(item.get("name")):
-            roots_by_name.setdefault(_norm(item.get("name")), []).append(item)
+        item_name = _text(item.get("name"))
+        parent_id = _text(item.get("parent_category_id"))
+        if not parent_id and item_name:
+            roots_by_name.setdefault(_norm(item_name), []).append(item)
+        if parent_id and item_name:
+            children_by_parent_and_name.setdefault(
+                (parent_id, _norm(item_name)), []
+            ).append(item)
 
     still_missing: Dict[str, str] = {}
     for key, display_path in wanted.items():
@@ -194,8 +201,26 @@ def resolve_category_uuids_from_api(
             uid = _text(matches[0].get("id"))
             out[key] = uid
             resolved[display_path] = uid
-        else:
-            still_missing[key] = display_path
+            continue
+
+        # Some Lightspeed responses vary in how category_path is populated.
+        # For a two-level path, fall back to exact parent/child matching by IDs.
+        parts = [p.strip() for p in display_path.split(">") if p.strip()]
+        if len(parts) == 2:
+            parent_name, child_name = parts
+            parent_matches = roots_by_name.get(_norm(parent_name), [])
+            if len(parent_matches) == 1:
+                parent_id = _text(parent_matches[0].get("id"))
+                child_matches = children_by_parent_and_name.get(
+                    (parent_id, _norm(child_name)), []
+                )
+                if len(child_matches) == 1 and _text(child_matches[0].get("id")):
+                    uid = _text(child_matches[0].get("id"))
+                    out[key] = uid
+                    resolved[display_path] = uid
+                    continue
+
+        still_missing[key] = display_path
 
     if create_missing_fallbacks and still_missing:
         for key, display_path in list(still_missing.items()):
