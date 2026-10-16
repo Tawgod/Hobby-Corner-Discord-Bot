@@ -4,10 +4,10 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 
 ## Current notebook
 
-- Notebook version: `2026-10-16-v41`
+- Notebook version: `2026-10-16-v42`
 - Branch: `product-migration-colab`
-- Preferred RMS source: `/content/drive/MyDrive/Hobby Corner Migration/HCDB Test Items.csv`
-- Legacy RMS candidate Google Sheet: fallback only when the Drive export is unavailable.
+- Authoritative RMS source: `/content/drive/MyDrive/Hobby Corner Migration/HCDB Test Items.csv`
+- Legacy RMS candidate Google Sheet: emergency fallback only; disabled by default with `ALLOW_LEGACY_SOURCE_FALLBACK = False`.
 - Operational mapping workbook: `LS: importer`
 - Dedicated review workbook: `Flagged Migration Items`
 
@@ -16,23 +16,39 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 - RMS on-hand quantity is **never** imported as opening Lightspeed inventory.
 - Opening inventory comes from the full physical inventory performed at cutover.
 - RMS quantity is used only as a migration-selection signal.
-- Lightspeed supplier/category destinations come from the current `LS: importer` mapping/UUID data and retained supplier list, not from guessing raw RMS names.
-- Unmapped or ambiguous category, supplier, brand, identifier, or source-identity values go to `REVIEW`; they are not allowed into a controlled write batch.
-- `General > No Category` is only a visible review fallback label for an unmapped category. It does not count as an approved category mapping.
-- Blank RMS primary suppliers remain unresolved/review even when the review sheet proposes `Other`.
-- Named suppliers are mapped to `Other` only when that mapping is explicitly approved; stale blank-disposition `Other` rows are not trusted.
+- The notebook fails closed when the authoritative Drive CSV is missing unless legacy fallback is deliberately enabled.
+- The current RMS bridge schema, required item ID/SKU/description values, and unique RMS Item IDs are validated before mapping analysis.
+- Lightspeed supplier/category destinations come from the current `LS: importer` mappings/UUID data and retained supplier list, not from guessing raw RMS names.
+- Conflicting duplicate category, supplier, brand, or UUID mapping rows stop setup instead of using a last-row-wins rule.
+- Unmapped or ambiguous category, supplier, brand, identifier, or source-code values go to `REVIEW`; they are not allowed into a controlled write batch.
+- `General > No Category` is a visible review label only. It does not count as an approved category mapping.
+- Blank RMS primary suppliers remain unresolved/review even when a review row proposes `Other`.
+- Named suppliers are mapped to `Other` only when that conversion is explicitly approved; stale blank-disposition `Other` rows are not trusted.
 - Exact retained/current supplier names are preferred over stale `Other` mappings. Missing supplier UUIDs are resolved read-only from Lightspeed by exact name and cached when found.
-- A nonblank RMS brand must resolve to the Brand ID Map before the product becomes write-eligible.
+- A nonblank RMS brand must resolve to `Brand ID Map` before the product becomes write-eligible.
 - Inactive items with RMS quantity > 0 remain migration candidates, but reorder values are forced to 0.
 - DoNotOrder items have reorder values forced to 0.
 - Default reorder suppression starts after 12 months without a reliable sale.
 - Games Workshop items receive special review because part numbers may be reused.
-- Source rows whose RMS description conflicts with the legacy web description, or whose valid barcode identity conflicts with the item code, are forced to review.
+- Strong source-identity conflicts such as a valid barcode that conflicts with a GTIN-like item code are forced to review.
+- Product-code collisions between migration candidates are detected across SKU, UPC and RMS aliases and forced to review before batch selection.
 - The pipeline supports dry-run, controlled test batches, restart/resume, status logging, a permanent run history, and a failure review queue.
 - Controlled product-write and reorder helpers enforce an absolute hard cap of 20 writes per invocation.
 - Controlled product writes reject any payload containing outlet/on-hand inventory fields.
-- Cleanup will not patch an existing Lightspeed test product from a source row that is currently identity-conflicted.
 - Bulk processing will run in Google Colab Pro; GitHub remains the source of truth.
+
+## Source validation
+
+The current bridge export is expected to contain the full 38-column product schema produced by `rms_bridge/bridge.ps1`, including source IDs, RMS classification, primary supplier and SupplierList fields, cost/retail fields, activity/reorder fields, descriptions, brand, picture, weight, UPC and aliases.
+
+Setup stops before mapping analysis when:
+
+- the authoritative CSV is missing and legacy fallback is not explicitly enabled;
+- required bridge columns are missing;
+- RMS Item ID, SKU, or Description is blank;
+- RMS Item ID is duplicated.
+
+The fresh export reviewed on 2026-10-16 contains 54,255 product rows.
 
 ## Mapping behavior
 
@@ -40,7 +56,9 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 
 `Mapping` is the RMS Department + RMS Category -> Lightspeed category-path source. `Cat ID` supplies the Lightspeed UUID for the exact resolved path.
 
-A category is considered mapped only when there is an explicit nonblank RMS mapping. An unmapped source classification is shown as `General > No Category` for review visibility, but remains `Category_Mapped=False` and cannot be selected for a write batch.
+A category is considered mapped only when there is an explicit nonblank RMS mapping **and** the resulting path has a `Cat ID` UUID. Missing category UUIDs are moved to review.
+
+An unmapped source classification is shown as `General > No Category` for review visibility, but remains `Category_Mapped=False` and cannot be selected for a write batch.
 
 Legacy/system classifications intentionally excluded from migration remain `EXCLUDE` rather than creating mapping work.
 
@@ -57,19 +75,44 @@ Supplier resolution order is:
 
 Blank source suppliers and unresolved named suppliers are never silently changed to `Other`.
 
-For supplier cost, the payload prefers the cost from the SupplierList row for the RMS primary supplier (`RMS_SupplierListCost`), then falls back to item-level cost fields.
+For supplier cost, the payload uses the first **positive** value in this precedence:
+
+1. `RMS_SupplierListCost` for the RMS primary supplier;
+2. `LastCost`;
+3. item `Cost`;
+4. `ReplacementCost`;
+5. compatible fallback cost fields.
+
+Zero placeholders do not mask a later real cost. When RMS has no positive cost, supplier price is omitted and the controlled preview marks supply cost as missing.
 
 ### Brand
 
 A blank RMS brand is allowed. A nonblank brand must resolve exactly in `Brand ID Map`; otherwise the row is `REVIEW`.
 
-### Product identity
+### Product identity and names
 
-The family name prefers `RMS_WebDescription` and falls back to `RMS_Description`, but source-identity guards run before a row can become write-eligible. Obviously unrelated web-description text and conflicting valid barcode identity are review conditions.
+The migration uses `RMS_WebDescription` as the family name only when it can be corroborated against the RMS Description / ExtendedDescription. If a web title cannot be corroborated, it receives a non-blocking `web_description_untrusted` warning and the product name falls back to the RMS Description.
 
-SKU remains a CUSTOM product code. RMS UPC and aliases are preserved as product codes according to their source/code shape.
+This avoids both failure modes seen during testing:
+
+- blindly using stale NitroSell/PAM titles from another product; and
+- blocking large numbers of legitimate products whose RMS descriptions are abbreviated.
+
+Strong barcode identity conflicts remain blocking review conditions.
+
+### Product codes
+
+- RMS SKU is written as a `CUSTOM` product code.
+- 12-digit numeric codes are typed as `UPC`.
+- 8- and 13-digit numeric codes are typed as `EAN`.
+- 14-digit numeric codes are typed as `ITF`.
+- Other aliases remain `CUSTOM`.
+
+Source-internal product-code collisions are detected before batch selection. The 2026-10-16 export audit found one duplicate SKU and six colliding code values among migration candidates; affected rows are routed to review.
 
 ## Controlled create verification
+
+The exact-SKU pre-create duplicate lookup uses the current `/api/2026-10/products` endpoint.
 
 After a controlled product-family create, the writer reads the created family/product back from Lightspeed and verifies:
 
@@ -77,7 +120,7 @@ After a controlled product-family create, the writer reads the created family/pr
 - long description
 - category UUID
 - brand UUID
-- SKU/UPC/alias codes
+- SKU/UPC/EAN/ITF/alias codes
 - supplier UUID
 - supplier item code
 - supplier price
@@ -88,7 +131,7 @@ After a controlled product-family create, the writer reads the created family/pr
 
 Any field mismatch changes the result to `ERROR` and records the mismatch rather than treating the create as verified.
 
-Duplicate protection currently gates on exact SKU before create. Source identity checks provide additional barcode protection, but full-catalog preflight against every existing Lightspeed code remains a recommended final-cutover safeguard.
+A final-cutover preflight against **all existing Lightspeed product codes**, not only exact SKU, remains a required/recommended safeguard before the full catalog migration.
 
 ## Reorder behavior
 
@@ -108,16 +151,16 @@ The migration writes/maintains:
 - `LS: importer / Migration Unmapped Suppliers` — ranked supplier gaps.
 - `LS: importer / Migration Unmapped Brands` — ranked brand UUID gaps.
 - `LS: importer / Migration Failure Review` — failed controlled writes.
-- `Flagged Migration Items / Flagged Items` — dedicated durable review queue with mapping/identity reasons and manual review fields.
+- `Flagged Migration Items / Flagged Items` — dedicated durable review queue with mapping/identity/code-collision reasons and manual review fields.
 
-Manual review fields in the dedicated flagged workbook are preserved when the current review queue is synchronized.
+Manual review fields and the existing Review Status column position are preserved when the dedicated flagged workbook is synchronized.
 
 ## Planned flow
 
-1. Load the preferred RMS Drive export.
-2. Load current `LS: importer` category, supplier and UUID data.
-3. Normalize source fields.
-4. Apply migration/reorder/source-identity rules.
+1. Load and validate the authoritative RMS Drive export.
+2. Load current `LS: importer` category, supplier, brand and UUID data.
+3. Normalize source fields and reject conflicting duplicate mappings.
+4. Apply migration/reorder/source-identity/code-collision rules.
 5. Resolve category/supplier/brand eligibility.
 6. Send unresolved or ambiguous rows to `REVIEW`.
 7. Build a varied, fully mapped dry-run preview.
@@ -127,26 +170,16 @@ Manual review fields in the dedicated flagged workbook are preserved when the cu
 11. Run the full migration with resumable batching after final approval.
 12. Perform physical inventory in Lightspeed to establish on-hand quantities.
 
-## Status values
-
-- READY
-- REVIEW
-- EXCLUDE
-- CREATED
-- UPDATED
-- VERIFIED
-- SKIPPED_EXISTING
-- ERROR
-
 ## Current policy decisions still open
 
 - Inactive RMS items with quantity > 0 are migration candidates, but controlled payloads currently set `active.in_store=True`. Decide whether final cutover should preserve RMS inactive state in Lightspeed.
 - Controlled payloads currently set `active.ecwid=False`. Online-channel activation is a separate cutover decision.
 - Tags are not currently part of the RMS migration payload.
-- Full-catalog duplicate/code-collision preflight beyond exact SKU should be completed before final catalog cutover.
+- `DEFAULT_RMS_WEIGHT_UNIT = 'LB'` remains the migration assumption because RMS does not export an explicit weight-unit field. Source values are consistent with that assumption, but it should remain documented as an assumption.
+- Full existing-Lightspeed code-collision preflight beyond exact SKU must be completed before final catalog cutover.
 
 ## Notes
 
-Category/supplier mappings can change while migration cleanup continues. The pipeline must always read the latest live mapping data at execution time.
+Category/supplier mappings can change while migration cleanup continues. The pipeline always reads the latest live mapping data at execution time.
 
 No production Railway deployment is required for the Colab migration notebook.
