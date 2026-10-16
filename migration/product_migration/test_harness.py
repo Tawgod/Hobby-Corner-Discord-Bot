@@ -1145,7 +1145,12 @@ def execute_controlled_product_write(
     timeout: int = 45,
 ) -> Dict[str, Any]:
     """
-    Create one STANDARD product family, upload one image if supplied, and read it back.
+    Create one STANDARD product through the currently live legacy product API,
+    upload one image if supplied, and read every mapped field back.
+
+    The notebook keeps the newer product-family-shaped internal payload so the
+    mapping layer stays ready for the 2026-10 API. This adapter translates that
+    payload to the supported legacy POST /api/2.0/products schema at write time.
 
     Safety rules:
       - exact SKU duplicate gate runs first
@@ -1163,7 +1168,8 @@ def execute_controlled_product_write(
     if len(products) != 1:
         raise ValueError("Controlled writer currently requires exactly one product per family.")
 
-    codes = products[0].get("codes") or []
+    product = products[0]
+    codes = product.get("codes") or []
     sku = next(
         (
             _text(code.get("code"))
@@ -1216,27 +1222,78 @@ def execute_controlled_product_write(
         "Error": "",
     }
 
+    def decimal_equal(left: Any, right: Any) -> bool:
+        if left is None or _text(left) == "":
+            return right is None or _text(right) == ""
+        try:
+            return Decimal(str(left)) == Decimal(str(right))
+        except (InvalidOperation, ValueError):
+            return _text(left) == _text(right)
+
+    # Translate the family-shaped internal model to the live legacy create
+    # schema. Standard products have only one sellable member.
+    legacy_payload: Dict[str, Any] = {
+        "name": _text(payload.get("name")),
+        "sku": sku,
+        "is_active": bool((product.get("active") or {}).get("in_store", True)),
+    }
+    if _text(payload.get("description")):
+        legacy_payload["description"] = _text(payload.get("description"))
+    if _text(payload.get("category_id")):
+        legacy_payload["product_category_id"] = _text(payload.get("category_id"))
+    if _text(payload.get("brand_id")):
+        legacy_payload["brand_id"] = _text(payload.get("brand_id"))
+
+    # SKU has its own legacy field. Preserve every additional UPC/EAN/ITF or
+    # alternate CUSTOM alias as product_codes.
+    extra_codes = []
+    skipped_primary_sku = False
+    for code in codes:
+        code_type = _text(code.get("type")).upper()
+        code_value = _text(code.get("code"))
+        if not code_value:
+            continue
+        if code_type == "CUSTOM" and code_value == sku and not skipped_primary_sku:
+            skipped_primary_sku = True
+            continue
+        extra_codes.append({"type": code_type or "CUSTOM", "code": code_value})
+    if extra_codes:
+        legacy_payload["product_codes"] = extra_codes
+
+    prices = product.get("prices") or {}
+    if prices.get("price_excluding_tax") is not None:
+        legacy_payload["price_excluding_tax"] = float(prices["price_excluding_tax"])
+    elif prices.get("price_including_tax") is not None:
+        legacy_payload["price_including_tax"] = float(prices["price_including_tax"])
+
+    suppliers = product.get("suppliers") or []
+    if suppliers:
+        supplier = suppliers[0]
+        if _text(supplier.get("supplier_id")):
+            legacy_payload["supplier_id"] = _text(supplier.get("supplier_id"))
+        if _text(supplier.get("code")):
+            legacy_payload["supplier_code"] = _text(supplier.get("code"))
+        if supplier.get("price") is not None and _text(supplier.get("price")) != "":
+            legacy_payload["supply_price"] = float(supplier.get("price"))
+
+    measurements = product.get("measurements") or {}
+    if measurements.get("weight") is not None:
+        legacy_payload["weight"] = float(measurements.get("weight"))
+    if _text(measurements.get("weight_unit")):
+        legacy_payload["weight_unit"] = _text(measurements.get("weight_unit")).upper()
+
     try:
-        # Duplicate gate uses the current 2026-10 product search endpoint.
+        # The store currently exposes the legacy/current product resource.
         dup = requests.get(
-            f"{base_host}/api/2026-10/products",
-            params={"sku": sku, "page_size": 50},
+            f"{base_host}/api/2.0/products",
+            params={"sku": sku},
             headers=headers,
             timeout=timeout,
         )
         dup.raise_for_status()
         body = dup.json()
-        raw_data = body.get("data")
-
-        # Accept either a list response or a nested products list defensively.
-        if isinstance(raw_data, list):
-            candidates = raw_data
-        elif isinstance(raw_data, dict):
-            nested = raw_data.get("products")
-            candidates = nested if isinstance(nested, list) else [raw_data]
-        else:
-            candidates = []
-
+        raw_data = body.get("data", [])
+        candidates = raw_data if isinstance(raw_data, list) else ([raw_data] if isinstance(raw_data, dict) else [])
         matches = [
             item for item in candidates
             if isinstance(item, dict) and _text(item.get("sku")) == sku
@@ -1245,32 +1302,34 @@ def execute_controlled_product_write(
             existing = matches[0]
             result["Status"] = "SKIPPED_EXISTING"
             result["Product ID"] = _text(existing.get("id"))
-            result["Family ID"] = _text(existing.get("family_id"))
+            # Legacy standard products have no explicit family resource. Store
+            # the product ID here so existing result-sheet columns stay usable.
+            result["Family ID"] = _text(existing.get("id"))
             return result
 
         created = requests.post(
-            f"{base_host}/api/2026-10/product_families",
-            json=payload,
+            f"{base_host}/api/2.0/products",
+            json=legacy_payload,
             headers={**headers, "Content-Type": "application/json"},
             timeout=timeout,
         )
         if not created.ok:
             raise RuntimeError(f"Create failed {created.status_code}: {created.text[:1000]}")
 
-        create_body = created.json().get("data") or created.json()
-        family_id = _text(
-            create_body.get("product_family_id")
-            or create_body.get("family_id")
-            or create_body.get("id")
-        )
-        product_ids = create_body.get("product_ids") or []
-        product_id = _text(product_ids[0] if product_ids else "")
+        create_json = created.json()
+        create_data = create_json.get("data", create_json) if isinstance(create_json, dict) else create_json
+        if isinstance(create_data, list):
+            product_id = _text(create_data[0] if create_data else "")
+        elif isinstance(create_data, dict):
+            product_id = _text(create_data.get("id") or create_data.get("product_id"))
+        else:
+            product_id = _text(create_data)
 
-        if not family_id or not product_id:
-            raise RuntimeError(f"Create succeeded but IDs were missing: {create_body}")
+        if not product_id:
+            raise RuntimeError(f"Create succeeded but product ID was missing: {create_json}")
 
-        result["Family ID"] = family_id
         result["Product ID"] = product_id
+        result["Family ID"] = product_id
 
         if picture_path:
             if not os.path.isfile(picture_path):
@@ -1284,7 +1343,7 @@ def execute_controlled_product_write(
 
             with open(picture_path, "rb") as fh:
                 upload = requests.post(
-                    f"{base_host}/api/2026-10/product_families/{family_id}/images",
+                    f"{base_host}/api/2.0/products/{product_id}/actions/image_upload",
                     headers=headers,
                     files={"image": (os.path.basename(picture_path), fh)},
                     timeout=timeout,
@@ -1293,115 +1352,71 @@ def execute_controlled_product_write(
                 raise RuntimeError(f"Image upload failed {upload.status_code}: {upload.text[:1000]}")
             result["Image Uploaded"] = True
 
-        family_read = requests.get(
-            f"{base_host}/api/2026-10/product_families/{family_id}",
+        read = requests.get(
+            f"{base_host}/api/2.0/products/{product_id}",
             headers=headers,
             timeout=timeout,
         )
-        if not family_read.ok:
+        if not read.ok:
             raise RuntimeError(
-                f"Family verify failed {family_read.status_code}: {family_read.text[:1000]}"
+                f"Product verify failed {read.status_code}: {read.text[:1000]}"
             )
+        data = read.json().get("data") or {}
 
-        family_data = family_read.json().get("data") or {}
-        expected_name = _text(payload.get("name"))
-        expected_description = _text(payload.get("description"))
-        expected_category = _text(payload.get("category_id"))
-        expected_brand = _text(payload.get("brand_id"))
-
-        result["Name Verified"] = _text(family_data.get("name")) == expected_name
+        result["Name Verified"] = _text(data.get("name")) == _text(legacy_payload.get("name"))
+        expected_description = _text(legacy_payload.get("description"))
         result["Description Verified"] = (
-            not expected_description
-            or _text(family_data.get("description")) == expected_description
+            not expected_description or _text(data.get("description")) == expected_description
         )
-        result["Category Verified"] = (
-            _text(family_data.get("category_id")) == expected_category
-        )
-        result["Brand Verified"] = (
-            _text(family_data.get("brand_id")) == expected_brand
-        )
-
-        product_read = requests.get(
-            f"{base_host}/api/2026-10/products/{product_id}",
-            headers=headers,
-            timeout=timeout,
-        )
-        if not product_read.ok:
-            raise RuntimeError(
-                f"Product verify failed {product_read.status_code}: {product_read.text[:1000]}"
-            )
-        product_data = product_read.json().get("data") or {}
-        expected_product = products[0]
+        actual_category = _text(data.get("product_category_id") or data.get("product_type_id"))
+        result["Category Verified"] = actual_category == _text(legacy_payload.get("product_category_id"))
+        result["Brand Verified"] = _text(data.get("brand_id")) == _text(legacy_payload.get("brand_id"))
 
         expected_codes = {
             (_text(x.get("type")).upper(), _text(x.get("code")))
-            for x in (expected_product.get("codes") or [])
-            if _text(x.get("code"))
+            for x in extra_codes if _text(x.get("code"))
         }
         actual_codes = {
             (_text(x.get("type")).upper(), _text(x.get("code")))
-            for x in (product_data.get("codes") or [])
+            for x in (data.get("product_codes") or [])
             if isinstance(x, dict) and _text(x.get("code"))
         }
-        result["Codes Verified"] = expected_codes == actual_codes
+        result["Codes Verified"] = expected_codes.issubset(actual_codes)
 
-        def decimal_equal(left: Any, right: Any) -> bool:
-            if left is None or _text(left) == "":
-                return right is None or _text(right) == ""
-            try:
-                return Decimal(str(left)) == Decimal(str(right))
-            except (InvalidOperation, ValueError):
-                return _text(left) == _text(right)
-
-        expected_suppliers = expected_product.get("suppliers") or []
-        actual_suppliers = product_data.get("suppliers") or []
-        if expected_suppliers:
-            exp = expected_suppliers[0]
-            matching = [
-                x for x in actual_suppliers
-                if isinstance(x, dict)
-                and _text(x.get("supplier_id")) == _text(exp.get("supplier_id"))
-                and _text(x.get("code")) == _text(exp.get("code"))
-                and decimal_equal(x.get("price"), exp.get("price"))
-            ]
-            result["Supplier Verified"] = bool(matching)
+        if suppliers:
+            supplier = suppliers[0]
+            result["Supplier Verified"] = (
+                _text(data.get("supplier_id")) == _text(supplier.get("supplier_id"))
+                and _text(data.get("supplier_code")) == _text(supplier.get("code"))
+                and decimal_equal(data.get("supply_price"), supplier.get("price"))
+            )
         else:
-            result["Supplier Verified"] = not actual_suppliers
+            result["Supplier Verified"] = True
 
-        expected_prices = expected_product.get("prices") or {}
-        if expected_prices:
-            actual_prices = product_data.get("prices") or {}
-            result["Price Verified"] = all(
-                decimal_equal(actual_prices.get(key), value)
-                for key, value in expected_prices.items()
+        if "price_excluding_tax" in legacy_payload:
+            result["Price Verified"] = decimal_equal(
+                data.get("price_excluding_tax"), legacy_payload.get("price_excluding_tax")
+            )
+        elif "price_including_tax" in legacy_payload:
+            result["Price Verified"] = decimal_equal(
+                data.get("price_including_tax"), legacy_payload.get("price_including_tax")
             )
         else:
             result["Price Verified"] = True
 
-        expected_measurements = expected_product.get("measurements") or {}
-        if expected_measurements:
-            actual_measurements = product_data.get("measurements") or {}
-            expected_weight = expected_measurements.get("weight")
-            actual_weight = actual_measurements.get("weight")
-            weight_matches = (
-                abs(float(actual_weight) - float(expected_weight)) < 1e-9
-                if actual_weight is not None and expected_weight is not None
-                else actual_weight == expected_weight
-            )
+        if measurements:
             result["Weight Verified"] = (
-                weight_matches
-                and _text(actual_measurements.get("weight_unit")).upper()
-                == _text(expected_measurements.get("weight_unit")).upper()
+                decimal_equal(data.get("weight"), measurements.get("weight"))
+                and _text(data.get("weight_unit")).upper()
+                == _text(measurements.get("weight_unit")).upper()
             )
         else:
             result["Weight Verified"] = True
 
-        expected_active = expected_product.get("active") or {}
-        actual_active = product_data.get("active") or {}
-        result["Active Verified"] = all(
-            bool(actual_active.get(key)) == bool(value)
-            for key, value in expected_active.items()
-        )
+        actual_active = data.get("is_active")
+        if actual_active is None:
+            actual_active = data.get("active")
+        result["Active Verified"] = bool(actual_active) == bool(legacy_payload.get("is_active"))
 
         result["Product Fields Verified"] = all([
             result["Name Verified"],
@@ -1415,10 +1430,8 @@ def execute_controlled_product_write(
             result["Active Verified"],
         ])
 
-        # Standard-product catalog images belong on the family. Product-level
-        # images are variant/member images and may not appear in the Retail UI.
-        images = family_data.get("images") or []
-        result["Image Verified"] = bool(images) if picture_path else False
+        images = data.get("images") or []
+        result["Image Verified"] = bool(images or data.get("image_url")) if picture_path else False
 
         result["Status"] = "CREATED"
         verification_failures = [
@@ -1437,9 +1450,7 @@ def execute_controlled_product_write(
         ]
         if verification_failures:
             result["Status"] = "ERROR"
-            result["Error"] = (
-                "Read-back mismatch: " + ", ".join(verification_failures)
-            )
+            result["Error"] = "Read-back mismatch: " + ", ".join(verification_failures)
         if picture_path and not result["Image Verified"]:
             result["Status"] = "ERROR"
             result["Error"] = (
@@ -1452,6 +1463,7 @@ def execute_controlled_product_write(
         result["Error"] = str(exc)
 
     return result
+
 
 
 def execute_controlled_batch(
