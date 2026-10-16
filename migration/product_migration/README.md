@@ -187,13 +187,13 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v47`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v48`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
 - Operational mapping workbook: `LS: importer`.
 - Dedicated review workbook: `Flagged Migration Items` / `Flagged Items`.
-- Product test batch: 20; absolute product-write cap: 20.
+- Product test batch is controlled by `TEST_BATCH_SIZE`; `MAX_TEST_WRITES` follows that value, with no separate fixed product cap.
 - Reorder test cap: 5.
 - All live-write switches default to `False`.
 - RMS item quantity is selection-only and opening inventory remains hard-coded to zero.
