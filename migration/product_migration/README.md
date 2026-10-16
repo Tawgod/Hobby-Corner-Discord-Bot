@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v48`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v49`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -210,3 +210,12 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - `ENABLE_MISSING_BRAND_CREATE` follows `ENABLE_PRODUCT_CREATE_TEST`. Missing brands are created just-in-time only for products actually selected into the live write batch; brands with no selected migrating product are never created.
 - Brand creation uses `POST /api/2026-04/brands`, then re-reads Lightspeed and writes the verified UUID into `Brand ID Map`.
 - The workflow never renames, merges, or deletes existing Lightspeed brands automatically.
+
+
+## Live product API compatibility
+
+- The migration notebook keeps a product-family-shaped internal payload so field ownership remains explicit and migration logic is ready for the Lightspeed 2026-10 model.
+- Hobby Corner's live retailer currently returns 404 for the 2026-10 product endpoints.
+- Controlled writes therefore use a live legacy product API adapter: duplicate lookup and create/read-back use `/api/2.0/products`, with standard-product fields translated at write time.
+- Image upload uses the supported legacy `/api/2.0/products/{product_id}/actions/image_upload` endpoint.
+- Failed test rows with `Status=ERROR` are not treated as previously migrated SKUs and remain eligible for future batches.
