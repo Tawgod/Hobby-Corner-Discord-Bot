@@ -32,6 +32,27 @@ def _decimal_string(value: Any) -> Optional[str]:
     return f"{dec:.2f}"
 
 
+def _first_positive_decimal(row: pd.Series, names: Iterable[str]) -> Optional[str]:
+    """
+    Return the first positive money value from the configured source precedence.
+    RMS frequently stores 0 in SupplierList/LastCost as a missing placeholder,
+    so zero must not mask a later real cost.
+    """
+    for name in names:
+        if name not in row.index:
+            continue
+        raw = row.get(name)
+        if raw is None or pd.isna(raw) or str(raw).strip() == "":
+            continue
+        try:
+            dec = Decimal(str(raw).replace("$", "").replace(",", "").strip())
+        except (InvalidOperation, ValueError):
+            continue
+        if dec > 0:
+            return f"{dec:.2f}"
+    return None
+
+
 def _split_aliases(value: Any) -> List[str]:
     raw = _text(value)
     if not raw:
@@ -600,10 +621,12 @@ def build_standard_family_payload(
     retail = _decimal_string(_first_existing(row, [
         "RetailPrice", "Retail Price", "Price", "RMS_RetailPrice", "RMS_Price"
     ]))
-    cost = _decimal_string(_first_existing(row, [
+    cost = _first_positive_decimal(row, [
         "RMS_SupplierListCost", "SupplierListCost",
-        "LastCost", "Cost", "RMS_Cost", "supply_price", "Supply Price"
-    ]))
+        "LastCost", "Cost", "RMS_Cost",
+        "ReplacementCost", "RMS_ReplacementCost",
+        "supply_price", "Supply Price"
+    ])
     description = _text(_first_existing(row, [
         "ExtendedDescription", "Ext. Description", "Web Description"
     ]))
@@ -706,6 +729,7 @@ def build_test_preview(
         if not brand_name: missing_rich_fields.append("brand")
         if not upc_codes: missing_rich_fields.append("UPC")
         if not supplier_entry.get("code"): missing_rich_fields.append("supplier code")
+        if supplier_entry and not supplier_entry.get("price"): missing_rich_fields.append("supply cost")
         if not measurements.get("weight"): missing_rich_fields.append("weight")
         if not picture: missing_rich_fields.append("picture")
 
