@@ -95,8 +95,41 @@ def _identity_tokens(value) -> set[str]:
         return set()
     return {
         token for token in re.findall(r"[a-z0-9]+", text)
-        if len(token) >= 3 and token not in IDENTITY_STOPWORDS
+        if len(token) >= 2 and token not in IDENTITY_STOPWORDS
     }
+
+
+def web_description_is_trusted(row: pd.Series) -> bool:
+    """
+    Decide whether the legacy Web Description is safe to use as the Lightspeed
+    family name.
+
+    RMS Description is heavily abbreviated, so lack of a direct word-for-word
+    match is not a hard identity failure. ExtendedDescription is also used as
+    corroborating source text. When the web title cannot be corroborated, the
+    migration falls back to RMS Description and records a non-blocking warning.
+    """
+    web = "" if pd.isna(row.get("RMS_WebDescription")) else str(row.get("RMS_WebDescription")).strip()
+    if not web:
+        return False
+
+    source_text = " ".join(
+        str(value).strip()
+        for value in [row.get("RMS_Description"), row.get("ExtendedDescription")]
+        if value is not None and not pd.isna(value) and str(value).strip()
+    )
+    source_tokens = _identity_tokens(source_text)
+    web_tokens = _identity_tokens(web)
+    if source_tokens and web_tokens and (source_tokens & web_tokens):
+        return True
+
+    # Character similarity catches common RMS abbreviations where tokenization
+    # does not, without allowing an unrelated title to become authoritative.
+    from difflib import SequenceMatcher
+    rms_description = "" if pd.isna(row.get("RMS_Description")) else str(row.get("RMS_Description")).strip()
+    left = re.sub(r"[^a-z0-9]+", "", norm(rms_description))
+    right = re.sub(r"[^a-z0-9]+", "", norm(web))
+    return bool(left and right and SequenceMatcher(None, left, right).ratio() >= 0.50)
 
 
 def _valid_gtin(value) -> bool:
@@ -113,21 +146,15 @@ def _valid_gtin(value) -> bool:
 
 def source_identity_review_flags(row: pd.Series) -> list[str]:
     """
-    Catch mixed-source RMS rows before they are eligible for product creation.
+    Catch strong source-identity conflicts before product creation.
 
-    The legacy NitroSell/PAM web-description table can contain records whose
-    ItemID does not describe the same product as the current RMS Item row.
-    Likewise, old Alias rows can contain a barcode belonging to another item.
-    These conditions are review gates, never automatic corrections.
+    The hard gate is barcode identity: when a SKU itself is a valid GTIN and
+    the row carries a different valid GTIN/UPC, the row is ambiguous and must
+    be reviewed. Legacy Web Description quality is handled separately by
+    web_description_is_trusted() so abbreviated but legitimate names are not
+    over-blocked.
     """
     flags: list[str] = []
-
-    desc = row.get("RMS_Description")
-    web = row.get("RMS_WebDescription")
-    desc_tokens = _identity_tokens(desc)
-    web_tokens = _identity_tokens(web)
-    if desc_tokens and web_tokens and not (desc_tokens & web_tokens):
-        flags.append("web_description_identity_conflict")
 
     sku = "" if pd.isna(row.get("RMS_SKU")) else str(row.get("RMS_SKU")).strip()
     upc = "" if pd.isna(row.get("RMS_UPC")) else str(row.get("RMS_UPC")).strip()
@@ -411,6 +438,18 @@ def analyze_candidates(
         elif not supplier:
             mapping_reasons.append("Unmapped supplier")
 
+        web_description = "" if pd.isna(row.get("RMS_WebDescription")) else str(row.get("RMS_WebDescription")).strip()
+        web_description_trusted = web_description_is_trusted(row)
+        result["Web_Description_Trusted"] = web_description_trusted
+        if web_description and not web_description_trusted:
+            existing_flags = [
+                x for x in str(result.get("Migration_Review_Flags", "")).split(",")
+                if x
+            ]
+            result["Migration_Review_Flags"] = ",".join(
+                dict.fromkeys([*existing_flags, "web_description_untrusted"])
+            )
+
         identity_flags = source_identity_review_flags(row)
         if identity_flags:
             existing_flags = [
@@ -422,7 +461,6 @@ def analyze_candidates(
             )
             mapping_reasons.extend(
                 {
-                    "web_description_identity_conflict": "Web description does not appear to match RMS item identity",
                     "barcode_identity_conflict": "Conflicting valid barcode identity on RMS row",
                 }[flag]
                 for flag in identity_flags
@@ -440,7 +478,54 @@ def analyze_candidates(
 
         rows.append(result)
 
-    return pd.DataFrame(rows)
+    analyzed = pd.DataFrame(rows)
+    if analyzed.empty:
+        return analyzed
+
+    # Lightspeed product codes must be unique across the catalog. Detect
+    # collisions within the source candidate set before selecting a write batch.
+    # Only non-EXCLUDE rows participate because excluded legacy duplicates do
+    # not create a catalog conflict at cutover.
+    candidate_mask = analyzed["migration_status"].isin(["READY", "REVIEW"])
+    code_owners: dict[str, set[int]] = {}
+    row_codes: dict[int, set[str]] = {}
+
+    for idx, row in analyzed[candidate_mask].iterrows():
+        codes: set[str] = set()
+        sku = "" if pd.isna(row.get("RMS_SKU")) else str(row.get("RMS_SKU")).strip()
+        upc = "" if pd.isna(row.get("RMS_UPC")) else str(row.get("RMS_UPC")).strip()
+        aliases = "" if pd.isna(row.get("RMS_Aliases")) else str(row.get("RMS_Aliases")).strip()
+        for code in [sku, upc, *aliases.split("|")]:
+            clean = str(code).strip()
+            if clean:
+                codes.add(clean.casefold())
+        row_codes[idx] = codes
+        for code in codes:
+            code_owners.setdefault(code, set()).add(idx)
+
+    collision_codes = {
+        code: owners for code, owners in code_owners.items()
+        if len(owners) > 1
+    }
+    for idx, codes in row_codes.items():
+        conflicts = sorted(code for code in codes if code in collision_codes)
+        if not conflicts:
+            continue
+        analyzed.at[idx, "migration_status"] = "REVIEW"
+        existing_flags = [
+            x for x in str(analyzed.at[idx, "Migration_Review_Flags"] or "").split(",")
+            if x
+        ]
+        analyzed.at[idx, "Migration_Review_Flags"] = ",".join(
+            dict.fromkeys([*existing_flags, "source_product_code_collision"])
+        )
+        existing_reason = str(analyzed.at[idx, "review_reason"] or "").strip()
+        collision_reason = "Source product code collision: " + ", ".join(conflicts)
+        analyzed.at[idx, "review_reason"] = "; ".join(
+            [x for x in [existing_reason, collision_reason] if x]
+        )
+
+    return analyzed
 
 
 def split_outputs(df: pd.DataFrame) -> dict[str, pd.DataFrame]:
