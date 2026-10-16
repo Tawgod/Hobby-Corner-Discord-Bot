@@ -101,6 +101,166 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
+def resolve_category_uuids_from_api(
+    category_uuid_map: Dict[str, str],
+    category_paths: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    create_missing_fallbacks: bool = False,
+    timeout: int = 45,
+) -> Tuple[Dict[str, str], Dict[str, str], List[str], List[Dict[str, str]]]:
+    """
+    Resolve exact Lightspeed category paths and optionally create missing
+    two-level fallback categories such as "Games > Other Games".
+
+    Creation is restricted to a missing child beneath an already-existing LV1
+    category. No root categories are created and no existing categories are
+    updated or deleted.
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required to resolve category UUIDs.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    def list_categories() -> List[Dict[str, Any]]:
+        res = requests.get(
+            f"{base_host}/api/2026-07/product_categories",
+            headers=headers,
+            params={"include": "family", "page_size": 1000},
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Lightspeed category lookup failed {res.status_code}: {res.text[:1000]}"
+            )
+        body = res.json()
+        data = body.get("data", {}) if isinstance(body, dict) else {}
+        rows = data.get("categories", []) if isinstance(data, dict) else []
+        return [x for x in rows if isinstance(x, dict)]
+
+    def path_for(item: Dict[str, Any]) -> str:
+        category_path = item.get("category_path") or []
+        names = [
+            _text(part.get("name"))
+            for part in category_path
+            if isinstance(part, dict) and _text(part.get("name"))
+        ]
+        if not names and _text(item.get("name")):
+            names = [_text(item.get("name"))]
+        return " > ".join(names)
+
+    wanted = {
+        _norm(path): _text(path)
+        for path in category_paths
+        if _text(path) and _norm(path) not in category_uuid_map
+    }
+    if not wanted:
+        return dict(category_uuid_map), {}, [], []
+
+    categories = list_categories()
+    out = dict(category_uuid_map)
+    resolved: Dict[str, str] = {}
+    created: List[Dict[str, str]] = []
+
+    by_path: Dict[str, List[Dict[str, Any]]] = {}
+    roots_by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for item in categories:
+        path = path_for(item)
+        if path:
+            by_path.setdefault(_norm(path), []).append(item)
+        if not item.get("parent_category_id") and _text(item.get("name")):
+            roots_by_name.setdefault(_norm(item.get("name")), []).append(item)
+
+    still_missing: Dict[str, str] = {}
+    for key, display_path in wanted.items():
+        matches = by_path.get(key, [])
+        if len(matches) == 1 and _text(matches[0].get("id")):
+            uid = _text(matches[0].get("id"))
+            out[key] = uid
+            resolved[display_path] = uid
+        else:
+            still_missing[key] = display_path
+
+    if create_missing_fallbacks and still_missing:
+        for key, display_path in list(still_missing.items()):
+            parts = [p.strip() for p in display_path.split(">") if p.strip()]
+            if len(parts) != 2 or not parts[1].startswith("Other "):
+                continue
+
+            parent_name, child_name = parts
+            parent_matches = roots_by_name.get(_norm(parent_name), [])
+            if len(parent_matches) != 1:
+                continue
+            parent_id = _text(parent_matches[0].get("id"))
+            if not parent_id:
+                continue
+
+            create = requests.post(
+                f"{base_host}/api/2026-07/product_categories/bulk",
+                headers=headers,
+                json={
+                    "categories": [{
+                        "name": child_name,
+                        "parent_category_id": parent_id,
+                    }]
+                },
+                timeout=timeout,
+            )
+            if not create.ok:
+                raise RuntimeError(
+                    f"Category create failed for '{display_path}' "
+                    f"{create.status_code}: {create.text[:1000]}"
+                )
+
+            body = create.json()
+            created_rows = body.get("data", []) if isinstance(body, dict) else []
+            created_id = ""
+            if isinstance(created_rows, list) and len(created_rows) == 1:
+                created_id = _text(created_rows[0].get("id"))
+            if not created_id:
+                # Read-back below is authoritative even if response shape varies.
+                pass
+            created.append({
+                "path": display_path,
+                "id": created_id,
+                "parent_id": parent_id,
+            })
+
+        # Re-read and verify every requested path exactly.
+        categories = list_categories()
+        by_path = {}
+        for item in categories:
+            path = path_for(item)
+            if path:
+                by_path.setdefault(_norm(path), []).append(item)
+
+        for key, display_path in list(still_missing.items()):
+            matches = by_path.get(key, [])
+            if len(matches) == 1 and _text(matches[0].get("id")):
+                uid = _text(matches[0].get("id"))
+                out[key] = uid
+                resolved[display_path] = uid
+                still_missing.pop(key, None)
+
+    unresolved = sorted(still_missing.values())
+    return out, resolved, unresolved, created
+
+
 def resolve_supplier_uuids_from_api(
     supplier_uuid_map: Dict[str, str],
     supplier_names: Iterable[str],
