@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v51`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v52`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -238,3 +238,8 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Aging/picture annotations do not by themselves block migration or move products to REVIEW.
 - When an exact RMS Department + Category mapping is absent, the analyzer may recover by RMS category name against the Lightspeed category catalog only when that category resolves to one unique destination. Exact segment matches win; unique compact-prefix matches such as `3D -> 3D Puzzles` are permitted.
 - The RMS bridge uses the connected RMS database's `Item`/Department/Category/Supplier/Alias data for core product fields, while `RMS_WebDescription` is sourced only from `HQcorp.dbo.nitroasl_pamtable.WebDescription`. The HQ PAM join uses the store Item's `HQID` (`PAM.ItemID = I.HQID`), not the store-local `Item.ID`. The product-web diagnostic shows both the incorrect store-ID lookup and the correct HQID lookup for known problem SKUs including `GW48-111`.
+
+
+### HQ PAM export regression guard
+- Notebook v52 hard-stops if the RMS CSV still contains the known bad `GW48-111` -> `Tenfold Dungeon` WebDescription produced by the old `PAM.ItemID = Item.ID` join.
+- A freshly regenerated CSV from the corrected bridge should show a blank WebDescription for `GW48-111`, causing migration to use RMS Item.Description (`Space Marine Dice`) as the product name.
