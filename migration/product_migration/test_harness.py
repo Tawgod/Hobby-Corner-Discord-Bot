@@ -417,25 +417,56 @@ def resolve_brand_uuids_from_api(
         return dict(brand_uuid_map), {}, [], []
 
     def list_brands() -> List[Dict[str, Any]]:
-        res = requests.get(
-            f"{base_host}/api/2026-04/brands",
-            headers=headers,
-            params={"page_size": 1000, "deleted": "false"},
-            timeout=timeout,
-        )
-        if not res.ok:
-            raise RuntimeError(
-                f"Lightspeed brand lookup failed {res.status_code}: {res.text[:1000]}"
+        # Lightspeed collection pagination is version-cursor based. Brand count
+        # can exceed 1000 after migration cleanup, so read every page.
+        rows: List[Dict[str, Any]] = []
+        after = 0
+        seen_after = set()
+        while True:
+            res = requests.get(
+                f"{base_host}/api/2026-04/brands",
+                headers=headers,
+                params={"page_size": 1000, "deleted": "false", "after": after},
+                timeout=timeout,
             )
-        body = res.json()
-        raw = body.get("data", body) if isinstance(body, dict) else body
-        if isinstance(raw, dict):
-            rows = raw.get("brands") or raw.get("items") or []
-        elif isinstance(raw, list):
-            rows = raw
-        else:
-            rows = []
-        return [x for x in rows if isinstance(x, dict)]
+            if not res.ok:
+                raise RuntimeError(
+                    f"Lightspeed brand lookup failed {res.status_code}: {res.text[:1000]}"
+                )
+            body = res.json()
+            raw = body.get("data", body) if isinstance(body, dict) else body
+            if isinstance(raw, dict):
+                page = raw.get("brands") or raw.get("items") or []
+            elif isinstance(raw, list):
+                page = raw
+            else:
+                page = []
+            page = [x for x in page if isinstance(x, dict)]
+            if not page:
+                break
+            rows.extend(page)
+
+            version_block = body.get("version", {}) if isinstance(body, dict) else {}
+            max_version = version_block.get("max") if isinstance(version_block, dict) else None
+            if max_version is None:
+                max_version = max(
+                    [item.get("version") for item in page if item.get("version") is not None],
+                    default=None,
+                )
+            if max_version is None:
+                # A full page without a cursor cannot be safely assumed complete.
+                if len(page) >= 1000:
+                    raise RuntimeError(
+                        "Lightspeed brand list returned a full page without a pagination cursor."
+                    )
+                break
+            next_after = int(max_version)
+            if next_after == after or next_after in seen_after:
+                raise RuntimeError("Lightspeed brand pagination cursor did not advance.")
+            seen_after.add(after)
+            after = next_after
+
+        return rows
 
     def index_brands(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
         by_name: Dict[str, List[Dict[str, Any]]] = {}
