@@ -476,6 +476,103 @@ def resolve_tag_uuids_from_api(
     return resolved, sorted(missing.values()), created
 
 
+def ensure_migration_flags_custom_field(
+    *,
+    api_domain: str,
+    token: str,
+    timeout: int = 45,
+) -> Dict[str, Any]:
+    """Ensure Hobby Corner's hidden product migration_flags field exists."""
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    base_host = domain.rstrip("/") if domain.startswith(("http://", "https://")) else f"https://{domain}.retail.lightspeed.app"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+    res = requests.get(
+        f"{base_host}/api/2026-07/workflows/custom_fields",
+        headers=headers,
+        params={"entity": "product"},
+        timeout=timeout,
+    )
+    if not res.ok:
+        raise RuntimeError(f"Custom-field lookup failed {res.status_code}: {res.text[:1000]}")
+    body = res.json()
+    raw = body.get("data", body) if isinstance(body, dict) else body
+    rows = raw if isinstance(raw, list) else (raw.get("items") or raw.get("custom_fields") or [] if isinstance(raw, dict) else [])
+    exact = next((x for x in rows if isinstance(x, dict) and _norm(x.get("name")) == "migration_flags"), None)
+    if exact:
+        return exact
+
+    create = requests.post(
+        f"{base_host}/api/2026-07/workflows/custom_fields",
+        headers=headers,
+        json={
+            "entity": "product",
+            "name": "migration_flags",
+            "title": "Migration Flags",
+            "type": "string",
+            "visible_in_ui": False,
+            "editable_in_ui": False,
+            "print_on_receipt": False,
+        },
+        timeout=timeout,
+    )
+    if not create.ok:
+        raise RuntimeError(f"Custom-field create failed {create.status_code}: {create.text[:1000]}")
+    data = create.json()
+    return data.get("data", data) if isinstance(data, dict) else {}
+
+
+def set_migration_flags_custom_field(
+    product_id: str,
+    flags: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    timeout: int = 45,
+) -> None:
+    """Write private migration annotations to the hidden product custom field."""
+    import requests
+
+    values = list(dict.fromkeys(_text(x) for x in flags if _text(x)))
+    if not values:
+        return
+    ensure_migration_flags_custom_field(
+        api_domain=api_domain, token=token, timeout=timeout
+    )
+    domain = _text(api_domain)
+    base_host = domain.rstrip("/") if domain.startswith(("http://", "https://")) else f"https://{domain}.retail.lightspeed.app"
+    headers = {
+        "Authorization": f"Bearer {_text(token)}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+    write = requests.post(
+        f"{base_host}/api/2026-07/workflows/custom_fields/values",
+        headers=headers,
+        json={
+            "entity": "product",
+            "entity_id": _text(product_id),
+            "values": [{
+                "name": "migration_flags",
+                "string_value": " | ".join(values),
+            }],
+        },
+        timeout=timeout,
+    )
+    if not write.ok:
+        raise RuntimeError(
+            f"Migration custom-field write failed {write.status_code}: {write.text[:1000]}"
+        )
+
+
 def resolve_brand_uuids_from_api(
     brand_uuid_map: Dict[str, str],
     brand_names: Iterable[str],
@@ -899,7 +996,6 @@ def build_standard_family_payload(
     category_uuid_map: Dict[str, str],
     supplier_uuid_map: Dict[str, str],
     brand_uuid_map: Optional[Dict[str, str]] = None,
-    tag_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Use the richer legacy web title only when its identity is corroborated;
@@ -1004,22 +1100,16 @@ def build_standard_family_payload(
             raise ValueError(f"{sku}: no Lightspeed brand UUID for '{brand_name}'.")
         payload["brand_id"] = brand_id
 
-    migration_tags = [
-        part.strip()
-        for part in _text(row.get("Migration_Tags")).split("|")
-        if part.strip()
-    ]
-    if migration_tags and tag_uuid_map:
-        tag_ids = [
-            tag_uuid_map.get(_norm(tag))
-            for tag in migration_tags
-            if tag_uuid_map.get(_norm(tag))
-        ]
-        if tag_ids:
-            payload["tag_ids"] = tag_ids
-
     if description:
         payload["description"] = description
+
+    migration_flags = [
+        part.strip()
+        for part in _text(row.get("Migration_Flags")).split("|")
+        if part.strip()
+    ]
+    if migration_flags:
+        payload["_migration_flags"] = migration_flags
 
     return payload
 
@@ -1029,7 +1119,6 @@ def build_test_preview(
     category_uuid_map: Dict[str, str],
     supplier_uuid_map: Dict[str, str],
     brand_uuid_map: Optional[Dict[str, str]] = None,
-    tag_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     preview_rows = []
@@ -1043,7 +1132,6 @@ def build_test_preview(
             category_uuid_map,
             supplier_uuid_map,
             brand_uuid_map=brand_uuid_map,
-            tag_uuid_map=tag_uuid_map,
             default_weight_unit=default_weight_unit,
         )
         payloads.append(payload)
@@ -1084,8 +1172,7 @@ def build_test_preview(
             "Category UUID": payload.get("category_id", ""),
             "Brand": brand_name,
             "Brand UUID": payload.get("brand_id", ""),
-            "Migration Tags": _text(row.get("Migration_Tags")),
-            "Tag IDs": " | ".join(payload.get("tag_ids", []) or []),
+            "Migration Flags": _text(row.get("Migration_Flags")),
             "Primary Barcode": barcode_codes[0]["code"] if barcode_codes else "",
             "Primary Barcode Type": barcode_codes[0]["type"] if barcode_codes else "",
             "Product Codes": " | ".join(
@@ -1285,6 +1372,7 @@ def execute_controlled_product_write(
     if payload_contains_opening_inventory(payload):
         raise ValueError("Blocked write: payload contains an inventory/on-hand field.")
 
+    migration_flags = list(payload.get("_migration_flags") or [])
     products = payload.get("products") or []
     if len(products) != 1:
         raise ValueError("Controlled writer currently requires exactly one product per family.")
@@ -1364,11 +1452,6 @@ def execute_controlled_product_write(
         legacy_payload["product_category_id"] = _text(payload.get("category_id"))
     if _text(payload.get("brand_id")):
         legacy_payload["brand_id"] = _text(payload.get("brand_id"))
-    if payload.get("tag_ids"):
-        legacy_payload["tag_ids"] = [
-            _text(tag_id) for tag_id in payload.get("tag_ids") if _text(tag_id)
-        ]
-
     # SKU has its own legacy field. Preserve every additional UPC/EAN/ITF or
     # alternate CUSTOM alias as product_codes.
     extra_codes = []
@@ -1465,6 +1548,8 @@ def execute_controlled_product_write(
             result["Image Height"] = quality.get("height") or ""
             result["Image Low Quality"] = bool(quality.get("low_quality"))
             result["Review Flags"] = ",".join(quality.get("review_flags") or [])
+            if result["Image Low Quality"] and "Picture Replacement Needed" not in migration_flags:
+                migration_flags.append("Picture Replacement Needed")
 
             with open(picture_path, "rb") as fh:
                 upload = requests.post(
@@ -1558,6 +1643,16 @@ def execute_controlled_product_write(
         images = data.get("images") or []
         result["Image Verified"] = bool(images or data.get("image_url")) if picture_path else False
 
+        if migration_flags:
+            set_migration_flags_custom_field(
+                product_id,
+                migration_flags,
+                api_domain=api_domain,
+                token=token,
+                timeout=timeout,
+            )
+        result["Migration Flags"] = " | ".join(migration_flags)
+
         result["Status"] = "CREATED"
         verification_failures = [
             label for label, ok in [
@@ -1619,8 +1714,14 @@ def execute_controlled_batch(
         row = preview.iloc[idx]
         picture_name = row.get("Picture Source", "")
         picture_path = find_picture_path(picture_name, image_search_roots)
+        payload_for_write = dict(payload)
+        flags = list(payload_for_write.get("_migration_flags") or [])
+        if not picture_path and "Missing Picture" not in flags:
+            flags.append("Missing Picture")
+        if flags:
+            payload_for_write["_migration_flags"] = flags
         write_result = execute_controlled_product_write(
-            payload,
+            payload_for_write,
             api_domain=api_domain,
             token=token,
             picture_path=picture_path,
