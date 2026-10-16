@@ -626,7 +626,7 @@ def build_standard_family_payload(
 ) -> Dict[str, Any]:
     # Use the richer legacy web title only when its identity is corroborated;
     # otherwise fall back to the RMS Description.
-    name, _, _ = _trusted_name_parts(row)
+    name, _, web_trusted = _trusted_name_parts(row)
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
@@ -660,8 +660,12 @@ def build_standard_family_payload(
         "supply_price", "Supply Price"
     ])
     description = _text(_first_existing(row, [
-        "ExtendedDescription", "Ext. Description", "Web Description"
+        "ExtendedDescription", "Ext. Description"
     ]))
+    if not description and web_trusted:
+        description = _text(_first_existing(row, [
+            "Web Description", "RMS_WebDescription", "WebDescription"
+        ]))
 
     codes = [{"type": "CUSTOM", "code": sku}]
     seen_codes = {sku}
