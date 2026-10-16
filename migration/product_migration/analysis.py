@@ -22,9 +22,12 @@ SUPPLIER_SOURCE_HEADERS = [
 SUPPLIER_TARGET_HEADERS = [
     "LS Supplier",
     "Lightspeed Supplier",
+    "Mapped Lightspeed Supplier Name",
     "Supplier Name",
     "Primary Supplier",
 ]
+
+DEFAULT_UNMAPPED_PRIMARY_SUPPLIER = "Other"
 
 # RMS categories intentionally left without a Lightspeed product-category mapping.
 # These are empty/legacy/special-system categories and should never be treated as
@@ -167,12 +170,27 @@ def build_category_map(df: pd.DataFrame) -> dict[tuple[str, str], dict]:
 
 
 def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> dict[str, str]:
+    """
+    Build primary-supplier migration aliases.
+
+    RMS_Supplier is sourced from Item.SupplierID (the RMS primary supplier).
+    This mapping must never be applied to secondary SupplierList relationships.
+    """
     out = {}
     for _, row in df.iterrows():
-        source = norm(row.get(source_col))
+        source_raw = "" if pd.isna(row.get(source_col)) else str(row.get(source_col)).strip()
         target = "" if pd.isna(row.get(target_col)) else str(row.get(target_col)).strip()
-        if source and target:
-            out[source] = target
+        disposition = norm(row.get("Disposition")) if "Disposition" in df.columns else ""
+
+        if disposition == "do not migrate":
+            continue
+        if not target:
+            continue
+
+        # The review sheet represents blank RMS primary suppliers with a readable
+        # sentinel label. Convert it back to the actual blank-source key.
+        source = "" if norm(source_raw) == "(blank rms supplier)" else norm(source_raw)
+        out[source] = target
     return out
 
 
@@ -215,15 +233,23 @@ def analyze_candidates(
                 [x for x in [existing, "Intentional non-migrating RMS category"] if x]
             )
 
-        supplier = supplier_map.get(norm(row.get("RMS_Supplier")), "")
+        # RMS_Supplier is the primary supplier from Item.SupplierID. Do not use
+        # secondary SupplierList relationships for supplier mapping.
+        primary_supplier_key = norm(row.get("RMS_Supplier"))
+        supplier = supplier_map.get(primary_supplier_key, "")
+        if not supplier:
+            supplier = DEFAULT_UNMAPPED_PRIMARY_SUPPLIER
+            result["Supplier_Fallback_Applied"] = True
+        else:
+            result["Supplier_Fallback_Applied"] = False
         result["LS_Supplier"] = supplier
         result["Supplier_Mapped"] = bool(supplier)
 
         mapping_reasons = []
         if not cat and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
-        if not supplier and str(row.get("RMS_Supplier", "")).strip():
-            mapping_reasons.append("Unmapped supplier")
+        # Unmapped primary suppliers are intentionally redirected to the
+        # canonical Lightspeed "Other" supplier so they do not block migration.
 
         if mapping_reasons and decision.migration_status != "EXCLUDE":
             result["migration_status"] = "REVIEW"
