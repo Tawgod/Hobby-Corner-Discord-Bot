@@ -108,6 +108,8 @@ def decide_product(
         reason = "Inactive and zero stock with recent activity - review before migration"
     elif inactive and quantity <= 0 and migration_status == "EXCLUDE":
         reason = "Inactive and zero stock with no recent activity"
+    elif quantity <= 0 and has_reorder and migration_status == "REVIEW":
+        reason = "Zero stock with reorder settings but no qualifying activity within 12 months - review before migration"
     elif inactive and quantity > 0:
         reason = "Inactive but RMS shows stock - migrate product, no reorder"
     elif do_not_order and quantity > 0:
