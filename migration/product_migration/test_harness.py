@@ -689,6 +689,7 @@ def build_test_preview(
             "Picture Source": picture,
             "Image Upload Required": bool(picture),
             "Missing Rich Fields": ", ".join(missing_rich_fields),
+            "Review Flags": _text(row.get("Migration_Review_Flags")),
             "Reorder Point Proposed": row.get("proposed_reorder_point", ""),
             "Restock Level Proposed": row.get("proposed_restock_level", ""),
             "Opening Inventory": 0,
@@ -1060,11 +1061,20 @@ def execute_controlled_batch(
         write_result["Run ID"] = _text(row.get("Run ID"))
         write_result["Picture Source"] = _text(picture_name)
         write_result["Picture Found"] = bool(picture_path)
-        if not picture_path:
-            existing_flags = [x for x in _text(write_result.get("Review Flags")).split(",") if x]
-            if "missing_image" not in existing_flags:
-                existing_flags.append("missing_image")
-            write_result["Review Flags"] = ",".join(existing_flags)
+
+        existing_flags = [
+            x for x in _text(write_result.get("Review Flags")).split(",") if x
+        ]
+        preview_flags = [
+            x for x in _text(row.get("Review Flags")).split(",") if x
+        ]
+        for flag in preview_flags:
+            if flag not in existing_flags:
+                existing_flags.append(flag)
+
+        if not picture_path and "missing_image" not in existing_flags:
+            existing_flags.append("missing_image")
+        write_result["Review Flags"] = ",".join(existing_flags)
         write_result["Opening Inventory"] = 0
         results.append(write_result)
 
