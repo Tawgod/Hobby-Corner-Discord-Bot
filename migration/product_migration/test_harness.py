@@ -373,6 +373,137 @@ def resolve_category_uuids_from_api(
     return out, resolved, unresolved, created
 
 
+def resolve_brand_uuids_from_api(
+    brand_uuid_map: Dict[str, str],
+    brand_names: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    create_missing: bool = False,
+    timeout: int = 45,
+) -> Tuple[Dict[str, str], Dict[str, str], List[str], List[Dict[str, str]]]:
+    """
+    Resolve brand UUIDs by exact normalized Lightspeed brand name.
+
+    When create_missing=True, create only names that do not already have an
+    exact normalized match, then re-read Lightspeed and verify the resulting
+    UUID. This never renames, merges, or deletes an existing brand.
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required to resolve brand UUIDs.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    wanted = {
+        _norm(name): _text(name)
+        for name in brand_names
+        if _text(name) and _norm(name) not in brand_uuid_map
+    }
+    if not wanted:
+        return dict(brand_uuid_map), {}, [], []
+
+    def list_brands() -> List[Dict[str, Any]]:
+        res = requests.get(
+            f"{base_host}/api/2026-04/brands",
+            headers=headers,
+            params={"page_size": 1000, "deleted": "false"},
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Lightspeed brand lookup failed {res.status_code}: {res.text[:1000]}"
+            )
+        body = res.json()
+        raw = body.get("data", body) if isinstance(body, dict) else body
+        if isinstance(raw, dict):
+            rows = raw.get("brands") or raw.get("items") or []
+        elif isinstance(raw, list):
+            rows = raw
+        else:
+            rows = []
+        return [x for x in rows if isinstance(x, dict)]
+
+    def index_brands(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        by_name: Dict[str, List[Dict[str, Any]]] = {}
+        for item in rows:
+            name = _text(item.get("name"))
+            uid = _text(item.get("id") or item.get("brand_id"))
+            if name and uid:
+                by_name.setdefault(_norm(name), []).append(item)
+        return by_name
+
+    out = dict(brand_uuid_map)
+    resolved: Dict[str, str] = {}
+    created: List[Dict[str, str]] = []
+    by_name = index_brands(list_brands())
+    still_missing: Dict[str, str] = {}
+
+    for key, display_name in wanted.items():
+        matches = by_name.get(key, [])
+        ids = sorted({
+            _text(item.get("id") or item.get("brand_id"))
+            for item in matches
+            if _text(item.get("id") or item.get("brand_id"))
+        })
+        if len(ids) == 1:
+            out[key] = ids[0]
+            resolved[display_name] = ids[0]
+        else:
+            still_missing[key] = display_name
+
+    if create_missing and still_missing:
+        for key, display_name in list(still_missing.items()):
+            create = requests.post(
+                f"{base_host}/api/2026-04/brands",
+                headers=headers,
+                json={"name": display_name},
+                timeout=timeout,
+            )
+            if not create.ok:
+                raise RuntimeError(
+                    f"Brand create failed for '{display_name}' "
+                    f"{create.status_code}: {create.text[:1000]}"
+                )
+            body = create.json()
+            data = body.get("data", body) if isinstance(body, dict) else {}
+            created.append({
+                "name": display_name,
+                "id": _text(data.get("id") or data.get("brand_id"))
+                if isinstance(data, dict) else "",
+            })
+
+        # Read-back is authoritative and also protects against response-shape
+        # differences between Lightspeed versions.
+        by_name = index_brands(list_brands())
+        for key, display_name in list(still_missing.items()):
+            matches = by_name.get(key, [])
+            ids = sorted({
+                _text(item.get("id") or item.get("brand_id"))
+                for item in matches
+                if _text(item.get("id") or item.get("brand_id"))
+            })
+            if len(ids) == 1:
+                out[key] = ids[0]
+                resolved[display_name] = ids[0]
+                still_missing.pop(key, None)
+
+    return out, resolved, sorted(still_missing.values()), created
+
+
 def resolve_supplier_uuids_from_api(
     supplier_uuid_map: Dict[str, str],
     supplier_names: Iterable[str],
