@@ -245,7 +245,6 @@ def analyze_candidates(
     supplier_map: dict,
 ) -> pd.DataFrame:
     rows = []
-    department_lv1_map = build_department_lv1_map(category_map)
 
     for _, row in candidates.iterrows():
         decision = decide_product(
@@ -274,33 +273,23 @@ def analyze_candidates(
 
         category_path = cat["path"] if cat else ""
         fallback_applied = False
-        fallback_needs_creation = False
 
-        # Migration fallback rules:
-        # - no RMS department -> General > No Category
-        # - RMS department present but RMS category blank -> Other <mapped LV1>
-        # Nonblank unmapped RMS categories remain REVIEW and are never silently
-        # collapsed into a fallback category.
-        if not intentional_category_exclusion and not dept_key:
+        # Any classification that is not explicitly mapped goes to the
+        # dedicated review bucket. This includes no department, blank category,
+        # or a nonblank department/category pair missing from Mapping.
+        # Intentionally excluded legacy/system categories remain EXCLUDE.
+        if not intentional_category_exclusion and not category_path:
             category_path = "General > No Category"
             fallback_applied = True
-        elif (
-            not intentional_category_exclusion
-            and dept_key
-            and not norm(rms_category)
-            and not cat
-        ):
-            lv1 = department_lv1_map.get(dept_key, "")
-            if lv1:
-                category_path = f"{lv1} > Other {lv1}"
-                fallback_applied = True
-                fallback_needs_creation = True
 
         result["LS_Category_Path"] = category_path
         result["Category_Mapped"] = bool(category_path)
         result["Category_Fallback_Applied"] = fallback_applied
-        result["Category_Fallback_Needs_Create"] = fallback_needs_creation
+        result["Category_Fallback_Needs_Create"] = False
         result["Category_Intentionally_Excluded"] = intentional_category_exclusion
+        result["Migration_Review_Flags"] = (
+            "unmapped_category_fallback" if fallback_applied else ""
+        )
 
         if intentional_category_exclusion:
             result["migration_status"] = "EXCLUDE"
