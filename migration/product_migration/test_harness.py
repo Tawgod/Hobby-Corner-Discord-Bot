@@ -761,7 +761,7 @@ def build_standard_family_payload(
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
-    brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
+    brand_name = _text(_first_existing(row, ["LS_Brand", "Brand", "RMS_Brand", "brand", "SubDescription3"]))
     upc = _text(_first_existing(row, ["RMS_UPC", "UPC", "Barcode", "barcode"]))
     aliases = _split_aliases(_first_existing(row, ["RMS_Aliases", "Aliases", "aliases"]))
     picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
@@ -900,7 +900,7 @@ def build_test_preview(
         ]
         measurements = product.get("measurements", {})
         picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
-        brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
+        brand_name = _text(_first_existing(row, ["LS_Brand", "Brand", "RMS_Brand", "brand", "SubDescription3"]))
         _, name_source, web_trusted = _trusted_name_parts(row)
         missing_rich_fields = []
         if not brand_name: missing_rich_fields.append("brand")
