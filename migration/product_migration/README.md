@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v43`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v44`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -199,3 +199,14 @@ As of 2026-10-16, the audited notebook version is `2026-10-16-v43`.
 - RMS item quantity is selection-only and opening inventory remains hard-coded to zero.
 
 Supplier-cost precedence for the controlled payload is the primary-supplier `RMS_SupplierListCost` when available, followed by legacy item-level cost fields.
+
+
+## Brand resolution
+
+- RMS/source brand values are resolved through `LS: importer / Brands` before UUID lookup.
+- `Clean Brand Name` is the canonical Lightspeed brand name.
+- `Combine` is an RMS/source alias that maps to the canonical clean name.
+- Exact canonical names are then resolved against the complete paginated Lightspeed brand list.
+- `ENABLE_MISSING_BRAND_CREATE = False` keeps dry setup non-destructive. Set it to `True` to create only canonical brand names that still have no exact Lightspeed match.
+- Brand creation uses `POST /api/2026-04/brands`, then re-reads Lightspeed and writes the verified UUID into `Brand ID Map`.
+- The workflow never renames, merges, or deletes existing Lightspeed brands automatically.
