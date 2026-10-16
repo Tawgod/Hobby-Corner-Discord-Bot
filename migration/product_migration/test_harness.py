@@ -101,6 +101,90 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
+def resolve_supplier_uuids_from_api(
+    supplier_uuid_map: Dict[str, str],
+    supplier_names: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    timeout: int = 45,
+) -> Tuple[Dict[str, str], Dict[str, str], List[str]]:
+    """
+    Resolve missing supplier UUIDs by exact Lightspeed supplier name.
+
+    This is read-only. It never creates or edits suppliers. Exact normalized
+    name matches only; ambiguous or missing names are returned unresolved.
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required to resolve missing supplier UUIDs.")
+
+    if domain.startswith("http://") or domain.startswith("https://"):
+        base_host = domain.rstrip("/")
+    else:
+        base_host = f"https://{domain}.retail.lightspeed.app"
+
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    wanted = {
+        _norm(name): _text(name)
+        for name in supplier_names
+        if _text(name) and _norm(name) not in supplier_uuid_map
+    }
+    if not wanted:
+        return dict(supplier_uuid_map), {}, []
+
+    res = requests.get(
+        f"{base_host}/api/2026-07/suppliers",
+        headers=headers,
+        params={"page_size": 1000, "deleted": "false"},
+        timeout=timeout,
+    )
+    if not res.ok:
+        raise RuntimeError(
+            f"Lightspeed supplier lookup failed {res.status_code}: {res.text[:1000]}"
+        )
+
+    body = res.json()
+    raw = body.get("data", body) if isinstance(body, dict) else body
+    if isinstance(raw, dict):
+        rows = raw.get("suppliers") or raw.get("items") or []
+    elif isinstance(raw, list):
+        rows = raw
+    else:
+        rows = []
+
+    by_name: Dict[str, List[str]] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            continue
+        name = _text(item.get("name") or item.get("supplier_name"))
+        uid = _text(item.get("id") or item.get("supplier_id"))
+        if name and uid:
+            by_name.setdefault(_norm(name), []).append(uid)
+
+    out = dict(supplier_uuid_map)
+    resolved: Dict[str, str] = {}
+    unresolved: List[str] = []
+
+    for key, display_name in wanted.items():
+        matches = sorted(set(by_name.get(key, [])))
+        if len(matches) == 1:
+            out[key] = matches[0]
+            resolved[display_name] = matches[0]
+        else:
+            unresolved.append(display_name)
+
+    return out, resolved, unresolved
+
+
 def select_test_batch(result: pd.DataFrame, size: int = 12, exclude_skus: Optional[Iterable[str]] = None) -> pd.DataFrame:
     """
     Pick a representative, fully mapped READY batch.
