@@ -55,6 +55,39 @@ def _first_existing(row: pd.Series, names: Iterable[str]) -> Any:
     return None
 
 
+def _trusted_name_parts(row: pd.Series) -> Tuple[str, str, bool]:
+    """
+    Return (name, source_label, web_trusted).
+
+    Prefer the legacy web title only when analysis has corroborated it against
+    the RMS item/extended description. Otherwise use the RMS Description so a
+    stale NitroSell title cannot rename the product.
+    """
+    web = _text(_first_existing(row, [
+        "Web Description", "RMS_WebDescription", "WebDescription"
+    ]))
+    rms = _text(_first_existing(row, ["RMS_Description", "Description"]))
+
+    trusted_value = row.get("Web_Description_Trusted") if "Web_Description_Trusted" in row.index else None
+    if trusted_value is None or pd.isna(trusted_value) or str(trusted_value).strip() == "":
+        try:
+            from analysis import web_description_is_trusted
+            web_trusted = bool(web and web_description_is_trusted(row))
+        except Exception:
+            web_trusted = False
+    else:
+        web_trusted = str(trusted_value).strip().casefold() in {"1", "true", "yes", "y"}
+
+    if web and web_trusted:
+        return web, "RMS WebDescription (trusted)", True
+    if rms:
+        return rms, "RMS Description", False
+    if web:
+        # Last-resort only for malformed source rows missing RMS Description.
+        return web, "RMS WebDescription (uncorroborated fallback)", False
+    return "", "", False
+
+
 def build_category_uuid_map(cat_id_df: pd.DataFrame) -> Dict[str, str]:
     headers = [str(c).strip() for c in cat_id_df.columns]
     required = {"Level 1", "UUID"}
@@ -538,16 +571,9 @@ def build_standard_family_payload(
     brand_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Dict[str, Any]:
-    # Prefer the richer customer-facing web title used by the legacy importer.
-    # RMS Description has a much shorter historical character limit and is only
-    # a fallback when no web description/title is available.
-    name = _text(_first_existing(row, [
-        "Web Description",
-        "RMS_WebDescription",
-        "WebDescription",
-        "RMS_Description",
-        "Description",
-    ]))
+    # Use the richer legacy web title only when its identity is corroborated;
+    # otherwise fall back to the RMS Description.
+    name, _, _ = _trusted_name_parts(row)
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
     supplier_name = _text(row.get("LS_Supplier"))
@@ -675,11 +701,7 @@ def build_test_preview(
         measurements = product.get("measurements", {})
         picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
         brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
-        name_source = ""
-        for candidate in ["Web Description", "RMS_WebDescription", "WebDescription", "RMS_Description", "Description"]:
-            if _text(row.get(candidate)):
-                name_source = candidate
-                break
+        _, name_source, web_trusted = _trusted_name_parts(row)
         missing_rich_fields = []
         if not brand_name: missing_rich_fields.append("brand")
         if not upc_codes: missing_rich_fields.append("UPC")
@@ -693,6 +715,7 @@ def build_test_preview(
             "SKU": _text(row.get("RMS_SKU")),
             "Name": payload["name"],
             "Name Source": name_source,
+            "Web Description Trusted": web_trusted,
             "LS Category Path": _text(row.get("LS_Category_Path")),
             "Category UUID": payload.get("category_id", ""),
             "Brand": brand_name,
@@ -1576,7 +1599,7 @@ def cleanup_existing_test_products(
 
     Source rules:
       - Lightspeed family name / customer-facing item description:
-        RMS Web Description first, RMS Description only as fallback.
+        trusted RMS Web Description first; otherwise RMS Description.
       - Lightspeed long description:
         RMS ExtendedDescription / Ext. Description when available.
       - Existing PictureName image is uploaded if the product has no image.
@@ -1669,8 +1692,7 @@ def cleanup_existing_test_products(
         web_description = _text(_first_existing(
             source_row, ["Web Description", "RMS_WebDescription", "WebDescription"]
         ))
-        desired_name = web_description or rms_description
-        name_source = "Web Description" if web_description else "RMS Description"
+        desired_name, name_source, web_trusted = _trusted_name_parts(source_row)
 
         long_description = _text(_first_existing(
             source_row, ["ExtendedDescription", "Ext. Description"]
@@ -1732,6 +1754,8 @@ def cleanup_existing_test_products(
             continue
 
         review_flags: List[str] = []
+        if web_description and not web_trusted:
+            review_flags.append("web_description_untrusted")
 
         try:
             family_res = requests.get(
