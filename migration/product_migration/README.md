@@ -4,7 +4,7 @@ This folder contains the product-migration pipeline for the Hobby Corner RMS-to-
 
 ## Current notebook
 
-- Notebook version: `2026-10-16-v40`
+- Notebook version: `2026-10-16-v41`
 - Branch: `product-migration-colab`
 - Preferred RMS source: `/content/drive/MyDrive/Hobby Corner Migration/HCDB Test Items.csv`
 - Legacy RMS candidate Google Sheet: fallback only when the Drive export is unavailable.
@@ -106,6 +106,7 @@ The migration writes/maintains:
 - `LS: importer / Migration Review` — compatibility review view.
 - `LS: importer / Migration Unmapped Categories` — ranked category gaps.
 - `LS: importer / Migration Unmapped Suppliers` — ranked supplier gaps.
+- `LS: importer / Migration Unmapped Brands` — ranked brand UUID gaps.
 - `LS: importer / Migration Failure Review` — failed controlled writes.
 - `Flagged Migration Items / Flagged Items` — dedicated durable review queue with mapping/identity reasons and manual review fields.
 
