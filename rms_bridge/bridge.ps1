@@ -136,7 +136,7 @@ SELECT
     I.Inactive,
     I.DoNotOrder,
     I.ExtendedDescription,
-    I.Content                                 AS RMS_WebDescription,
+    PAM.WebDescription                       AS RMS_WebDescription,
     I.SubDescription1,
     I.SubDescription2,
     I.SubDescription3                         AS Brand,
@@ -149,6 +149,7 @@ FROM Item I
 LEFT JOIN Department D ON D.ID = I.DepartmentID
 LEFT JOIN Category C ON C.ID = I.CategoryID
 LEFT JOIN Supplier S ON S.ID = I.SupplierID
+LEFT JOIN HQcorp.dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.ID
 OUTER APPLY (
     SELECT TOP 1
         SL.ReorderNumber,
@@ -502,7 +503,7 @@ ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
     Write-Host "UPC/aliases source: Alias"
     Write-Host "Supplier item code source: SupplierList.ReorderNumber"
     Write-Host "Supplier code source: Supplier.Code"
-    Write-Host "Web description source: Item.Content"
+    Write-Host "Web description source: HQcorp.dbo.nitroasl_pamtable.WebDescription"
   }
 
   "customers-preview" {
