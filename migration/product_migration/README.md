@@ -183,3 +183,19 @@ Manual review fields and the existing Review Status column position are preserve
 Category/supplier mappings can change while migration cleanup continues. The pipeline always reads the latest live mapping data at execution time.
 
 No production Railway deployment is required for the Colab migration notebook.
+
+
+## Current notebook configuration
+
+As of 2026-10-16, the audited notebook version is `2026-10-16-v39`.
+
+- Preferred RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
+- Legacy RMS candidate Google Sheet: fallback only when the Drive CSV is unavailable.
+- Operational mapping workbook: `LS: importer`.
+- Dedicated review workbook: `Flagged Migration Items` / `Flagged Items`.
+- Product test batch: 20; absolute product-write cap: 20.
+- Reorder test cap: 5.
+- All live-write switches default to `False`.
+- RMS item quantity is selection-only and opening inventory remains hard-coded to zero.
+
+Supplier-cost precedence for the controlled payload is the primary-supplier `RMS_SupplierListCost` when available, followed by legacy item-level cost fields.
