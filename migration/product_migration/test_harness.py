@@ -1197,11 +1197,17 @@ def execute_controlled_batch(
 
     max_writes is a hard guardrail; raise instead of silently processing more.
     """
+    absolute_limit = 20
+    if max_writes > absolute_limit:
+        raise ValueError(
+            f"Configured product-write limit {max_writes} exceeds the absolute controlled-test cap of {absolute_limit}."
+        )
     if len(payloads) != len(preview):
         raise ValueError("Preview/payload row counts do not match.")
-    if len(payloads) > max_writes:
+    if len(payloads) > absolute_limit or len(payloads) > max_writes:
         raise ValueError(
-            f"Controlled test contains {len(payloads)} products; hard limit is {max_writes}."
+            f"Controlled test contains {len(payloads)} products; "
+            f"configured limit is {max_writes} and absolute cap is {absolute_limit}."
         )
 
     results = []
@@ -1500,9 +1506,15 @@ def apply_controlled_reorder_batch(
       - Reorder Point Proposed
       - Restock Level Proposed
     """
-    if len(rows) > max_writes:
+    absolute_limit = 20
+    if max_writes > absolute_limit:
         raise ValueError(
-            f"Controlled reorder test contains {len(rows)} rows; hard limit is {max_writes}."
+            f"Configured reorder-write limit {max_writes} exceeds the absolute controlled-test cap of {absolute_limit}."
+        )
+    if len(rows) > absolute_limit or len(rows) > max_writes:
+        raise ValueError(
+            f"Controlled reorder test contains {len(rows)} rows; "
+            f"configured limit is {max_writes} and absolute cap is {absolute_limit}."
         )
 
     out = []
@@ -1635,6 +1647,19 @@ def cleanup_existing_test_products(
         if source_row is None:
             result["Status"] = "SOURCE_NOT_FOUND"
             result["Review Flags"] = "migration_source_missing"
+            output.append(result)
+            continue
+
+        # Never use cleanup to "repair" an existing Lightspeed product from a
+        # source row that the migration analysis considers identity-conflicted.
+        from analysis import source_identity_review_flags
+        source_identity_flags = source_identity_review_flags(source_row)
+        if source_identity_flags:
+            result["Status"] = "SOURCE_REVIEW"
+            result["Review Flags"] = ",".join(source_identity_flags)
+            result["Error"] = (
+                "Cleanup blocked because the RMS source row has an identity conflict."
+            )
             output.append(result)
             continue
 
