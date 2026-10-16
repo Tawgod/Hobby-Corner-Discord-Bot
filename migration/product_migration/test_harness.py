@@ -67,6 +67,20 @@ def _split_aliases(value: Any) -> List[str]:
     return out
 
 
+def _product_code_type(value: Any) -> str:
+    code = _text(value)
+    if not code.isdigit():
+        return "CUSTOM"
+    length = len(code)
+    if length == 12:
+        return "UPC"
+    if length in {8, 13}:
+        return "EAN"
+    if length == 14:
+        return "ITF"
+    return "CUSTOM"
+
+
 def _first_existing(row: pd.Series, names: Iterable[str]) -> Any:
     for name in names:
         if name in row.index:
@@ -634,15 +648,14 @@ def build_standard_family_payload(
     codes = [{"type": "CUSTOM", "code": sku}]
     seen_codes = {sku}
     if upc and upc not in seen_codes:
-        codes.append({"type": "UPC", "code": upc})
+        codes.append({"type": _product_code_type(upc), "code": upc})
         seen_codes.add(upc)
     for alias in aliases:
         if alias in seen_codes:
             continue
-        # Preserve alternate RMS aliases. Numeric GTIN-like values are barcodes;
-        # other aliases remain CUSTOM codes.
-        alias_type = "UPC" if alias.isdigit() and len(alias) in {8, 12, 13, 14} else "CUSTOM"
-        codes.append({"type": alias_type, "code": alias})
+        # Preserve alternate RMS aliases with barcode types based on code length.
+        # Lightspeed accepts UPC/EAN/ITF/CUSTOM codes and requires code uniqueness.
+        codes.append({"type": _product_code_type(alias), "code": alias})
         seen_codes.add(alias)
 
     product: Dict[str, Any] = {
@@ -992,9 +1005,9 @@ def execute_controlled_product_write(
     }
 
     try:
-        # Duplicate gate uses the mature 2.0 product search endpoint.
+        # Duplicate gate uses the current 2026-10 product search endpoint.
         dup = requests.get(
-            f"{base_host}/api/2.0/products",
+            f"{base_host}/api/2026-10/products",
             params={"sku": sku, "page_size": 50},
             headers=headers,
             timeout=timeout,
@@ -1003,8 +1016,7 @@ def execute_controlled_product_write(
         body = dup.json()
         raw_data = body.get("data")
 
-        # Lightspeed's 2.0 response can be either a list of products or an
-        # object containing a products list depending on the query/result.
+        # Accept either a list response or a nested products list defensively.
         if isinstance(raw_data, list):
             candidates = raw_data
         elif isinstance(raw_data, dict):
@@ -1737,7 +1749,7 @@ def cleanup_existing_test_products(
             # Migration Test Results (for example BSI-117).
             try:
                 search_res = requests.get(
-                    f"{base_host}/api/2.0/products",
+                    f"{base_host}/api/2026-10/products",
                     params={"sku": sku, "page_size": 50},
                     headers=headers,
                     timeout=timeout,
