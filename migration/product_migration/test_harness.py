@@ -374,6 +374,108 @@ def resolve_category_uuids_from_api(
     return out, resolved, unresolved, created
 
 
+def resolve_tag_uuids_from_api(
+    tag_names: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    create_missing: bool = False,
+    timeout: int = 45,
+) -> Tuple[Dict[str, str], List[str], List[Dict[str, str]]]:
+    """
+    Resolve exact Lightspeed tag names against the live 2026-07 tag resource.
+    Missing tags are created only when explicitly requested by a live write run.
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required to resolve tags.")
+
+    base_host = domain.rstrip("/") if domain.startswith(("http://", "https://")) else f"https://{domain}.retail.lightspeed.app"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+    wanted = {_norm(name): _text(name) for name in tag_names if _text(name)}
+    if not wanted:
+        return {}, [], []
+
+    def list_tags() -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        after = 0
+        seen_after = set()
+        while True:
+            res = requests.get(
+                f"{base_host}/api/2026-07/tags",
+                headers=headers,
+                params={"page_size": 1000, "deleted": "false", "after": after},
+                timeout=timeout,
+            )
+            if not res.ok:
+                raise RuntimeError(f"Lightspeed tag lookup failed {res.status_code}: {res.text[:1000]}")
+            body = res.json()
+            raw = body.get("data", body) if isinstance(body, dict) else body
+            page = raw if isinstance(raw, list) else (
+                raw.get("tags") or raw.get("items") or [] if isinstance(raw, dict) else []
+            )
+            page = [x for x in page if isinstance(x, dict)]
+            if not page:
+                break
+            rows.extend(page)
+            version_block = body.get("version", {}) if isinstance(body, dict) else {}
+            max_version = version_block.get("max") if isinstance(version_block, dict) else None
+            if max_version is None:
+                max_version = max([item.get("version") for item in page if item.get("version") is not None], default=None)
+            if max_version is None:
+                if len(page) >= 1000:
+                    raise RuntimeError("Lightspeed tag list returned a full page without a pagination cursor.")
+                break
+            next_after = int(max_version)
+            if next_after == after or next_after in seen_after:
+                raise RuntimeError("Lightspeed tag pagination cursor did not advance.")
+            seen_after.add(after)
+            after = next_after
+        return rows
+
+    def index_tags(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+        out: Dict[str, str] = {}
+        for item in rows:
+            name = _text(item.get("name"))
+            uid = _text(item.get("id") or item.get("tag_id"))
+            if name and uid:
+                out[_norm(name)] = uid
+        return out
+
+    existing = index_tags(list_tags())
+    resolved = {display: existing[key] for key, display in wanted.items() if key in existing}
+    missing = {key: display for key, display in wanted.items() if key not in existing}
+    created: List[Dict[str, str]] = []
+
+    if create_missing and missing:
+        for key, display in list(missing.items()):
+            res = requests.post(
+                f"{base_host}/api/2026-07/tags",
+                headers=headers,
+                json={"name": display},
+                timeout=timeout,
+            )
+            if not res.ok:
+                raise RuntimeError(f"Tag create failed for '{display}' {res.status_code}: {res.text[:1000]}")
+            created.append({"name": display})
+
+        existing = index_tags(list_tags())
+        for key, display in list(missing.items()):
+            if key in existing:
+                resolved[display] = existing[key]
+                missing.pop(key, None)
+
+    return resolved, sorted(missing.values()), created
+
+
 def resolve_brand_uuids_from_api(
     brand_uuid_map: Dict[str, str],
     brand_names: Iterable[str],
@@ -797,6 +899,7 @@ def build_standard_family_payload(
     category_uuid_map: Dict[str, str],
     supplier_uuid_map: Dict[str, str],
     brand_uuid_map: Optional[Dict[str, str]] = None,
+    tag_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Use the richer legacy web title only when its identity is corroborated;
@@ -901,6 +1004,20 @@ def build_standard_family_payload(
             raise ValueError(f"{sku}: no Lightspeed brand UUID for '{brand_name}'.")
         payload["brand_id"] = brand_id
 
+    migration_tags = [
+        part.strip()
+        for part in _text(row.get("Migration_Tags")).split("|")
+        if part.strip()
+    ]
+    if migration_tags and tag_uuid_map:
+        tag_ids = [
+            tag_uuid_map.get(_norm(tag))
+            for tag in migration_tags
+            if tag_uuid_map.get(_norm(tag))
+        ]
+        if tag_ids:
+            payload["tag_ids"] = tag_ids
+
     if description:
         payload["description"] = description
 
@@ -912,6 +1029,7 @@ def build_test_preview(
     category_uuid_map: Dict[str, str],
     supplier_uuid_map: Dict[str, str],
     brand_uuid_map: Optional[Dict[str, str]] = None,
+    tag_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]]]:
     preview_rows = []
@@ -925,6 +1043,7 @@ def build_test_preview(
             category_uuid_map,
             supplier_uuid_map,
             brand_uuid_map=brand_uuid_map,
+            tag_uuid_map=tag_uuid_map,
             default_weight_unit=default_weight_unit,
         )
         payloads.append(payload)
@@ -965,6 +1084,8 @@ def build_test_preview(
             "Category UUID": payload.get("category_id", ""),
             "Brand": brand_name,
             "Brand UUID": payload.get("brand_id", ""),
+            "Migration Tags": _text(row.get("Migration_Tags")),
+            "Tag IDs": " | ".join(payload.get("tag_ids", []) or []),
             "Primary Barcode": barcode_codes[0]["code"] if barcode_codes else "",
             "Primary Barcode Type": barcode_codes[0]["type"] if barcode_codes else "",
             "Product Codes": " | ".join(
@@ -1243,6 +1364,10 @@ def execute_controlled_product_write(
         legacy_payload["product_category_id"] = _text(payload.get("category_id"))
     if _text(payload.get("brand_id")):
         legacy_payload["brand_id"] = _text(payload.get("brand_id"))
+    if payload.get("tag_ids"):
+        legacy_payload["tag_ids"] = [
+            _text(tag_id) for tag_id in payload.get("tag_ids") if _text(tag_id)
+        ]
 
     # SKU has its own legacy field. Preserve every additional UPC/EAN/ITF or
     # alternate CUSTOM alias as product_codes.
