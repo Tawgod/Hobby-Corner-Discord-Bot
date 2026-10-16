@@ -126,7 +126,7 @@ def source_identity_review_flags(row: pd.Series) -> list[str]:
     web = row.get("RMS_WebDescription")
     desc_tokens = _identity_tokens(desc)
     web_tokens = _identity_tokens(web)
-    if len(desc_tokens) >= 2 and len(web_tokens) >= 2 and not (desc_tokens & web_tokens):
+    if desc_tokens and web_tokens and not (desc_tokens & web_tokens):
         flags.append("web_description_identity_conflict")
 
     sku = "" if pd.isna(row.get("RMS_SKU")) else str(row.get("RMS_SKU")).strip()
