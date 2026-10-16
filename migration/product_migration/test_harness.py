@@ -755,14 +755,25 @@ def build_test_preview(
         payloads.append(payload)
         product = payload["products"][0]
         supplier_entry = product.get("suppliers", [{}])[0] if product.get("suppliers") else {}
-        upc_codes = [x.get("code", "") for x in product.get("codes", []) if x.get("type") == "UPC"]
+        all_codes = [
+            {
+                "type": _text(x.get("type")).upper(),
+                "code": _text(x.get("code")),
+            }
+            for x in product.get("codes", [])
+            if isinstance(x, dict) and _text(x.get("code"))
+        ]
+        barcode_codes = [
+            x for x in all_codes
+            if x["type"] in {"UPC", "EAN", "ITF", "JAN", "ISBN"}
+        ]
         measurements = product.get("measurements", {})
         picture = _text(_first_existing(row, ["PictureName", "Picture", "RMS_Picture", "image_url", "Image URL", "Image"]))
         brand_name = _text(_first_existing(row, ["Brand", "RMS_Brand", "brand", "SubDescription3"]))
         _, name_source, web_trusted = _trusted_name_parts(row)
         missing_rich_fields = []
         if not brand_name: missing_rich_fields.append("brand")
-        if not upc_codes: missing_rich_fields.append("UPC")
+        if not barcode_codes: missing_rich_fields.append("barcode")
         if not supplier_entry.get("code"): missing_rich_fields.append("supplier code")
         if supplier_entry and not supplier_entry.get("price"): missing_rich_fields.append("supply cost")
         if not measurements.get("weight"): missing_rich_fields.append("weight")
@@ -779,7 +790,11 @@ def build_test_preview(
             "Category UUID": payload.get("category_id", ""),
             "Brand": brand_name,
             "Brand UUID": payload.get("brand_id", ""),
-            "UPC": upc_codes[0] if upc_codes else "",
+            "Primary Barcode": barcode_codes[0]["code"] if barcode_codes else "",
+            "Primary Barcode Type": barcode_codes[0]["type"] if barcode_codes else "",
+            "Product Codes": " | ".join(
+                f'{x["type"]}:{x["code"]}' for x in all_codes
+            ),
             "LS Supplier": _text(row.get("LS_Supplier")),
             "Supplier UUID": (
                 payload["products"][0].get("suppliers", [{}])[0].get("supplier_id", "")
