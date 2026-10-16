@@ -419,17 +419,12 @@ SELECT TOP 100
     I.Content,
     I.PictureName,
     LPAM.WebDescription AS LocalPAM_WebDescription,
-    LPAM.DBTimestamp AS LocalPAM_DBTimestamp,
-    HPAM.WebDescription AS HQPAM_WebDescription,
-    HPAM.DBTimestamp AS HQPAM_DBTimestamp,
-    WI.*
+    HPAM.WebDescription AS HQPAM_WebDescription
 FROM Item I
 LEFT JOIN dbo.nitroasl_pamtable LPAM
   ON LPAM.ItemID = I.ID
 LEFT JOIN HQcorp.dbo.nitroasl_pamtable HPAM
   ON HPAM.ItemID = I.ID
-LEFT JOIN WebLinK_item WI
-  ON WI.id = I.ID
 WHERE I.ItemLookupCode IN (
     'GW48-111','WZK96383','DOW7201','TES1133TT','TES1162TT','BSI-117',
     'ULP81126','ULP81156','TES1103TT','TES1104TT','TES1108TT',
@@ -442,10 +437,10 @@ ORDER BY I.ItemLookupCode;
       Write-Host "Web-description diagnostic rows: $($rows.Count)" -ForegroundColor Green
       $rows | Format-List
     } catch {
-      Write-Host "Direct Item/WebLinK join failed; showing schemas instead." -ForegroundColor Yellow
-      foreach ($target in @("Item","WebLinK_item","WebLinK_itemdynamic")) {
+      Write-Host "PAM web-description diagnostic failed; showing PAM schemas instead." -ForegroundColor Yellow
+      foreach ($target in @("nitroasl_pamtable")) {
         Write-Host ""
-        Write-Host "SCHEMA: $target" -ForegroundColor Cyan
+        Write-Host "LOCAL SCHEMA: $target" -ForegroundColor Cyan
         $escaped = $target.Replace("'", "''")
         @(Invoke-SqlRows @"
 SELECT ORDINAL_POSITION,COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH
