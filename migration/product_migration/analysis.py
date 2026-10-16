@@ -317,11 +317,12 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
     RMS_Supplier is sourced from Item.SupplierID (the RMS primary supplier).
     This mapping must never be applied to secondary SupplierList relationships.
 
-    Safety rule:
-    - A blank-disposition mapping to "Other" is treated as unresolved legacy
-      review data, not as an approved supplier conversion.
-    - Explicitly approved mappings (for example Disposition=MAP) are honored.
-    - The blank-RMS-supplier review row may still map to Other.
+    Supplier fallback rule:
+    - Explicit mappings are honored.
+    - Named suppliers mapped to "Other" are valid fallbacks even when disposition
+      is blank; "Other" is the intentional catch-all supplier for migration.
+    - A blank RMS primary supplier remains distinct from an unmapped named supplier
+      and is still reviewed separately.
     """
     out = {}
     for _, row in df.iterrows():
@@ -335,11 +336,6 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
             continue
 
         source = "" if norm(source_raw) == "(blank rms supplier)" else norm(source_raw)
-
-        # Do not silently collapse a named RMS supplier to Other unless that
-        # choice was explicitly reviewed/approved in the mapping sheet.
-        if norm(target) == "other" and source and not disposition:
-            continue
 
         if source in out and norm(out[source]) != norm(target):
             raise ValueError(
@@ -416,10 +412,13 @@ def analyze_candidates(
         # secondary SupplierList relationships for supplier mapping.
         primary_supplier_key = norm(row.get("RMS_Supplier"))
         supplier = supplier_map.get(primary_supplier_key, "")
-        result["Supplier_Fallback_Applied"] = False
+        # A named RMS supplier with no explicit mapping falls back to the
+        # canonical "Other" supplier. Blank RMS suppliers remain review-only.
+        supplier_fallback = bool(primary_supplier_key and not supplier)
+        if supplier_fallback:
+            supplier = "Other"
+        result["Supplier_Fallback_Applied"] = supplier_fallback
         result["LS_Supplier"] = supplier
-        # A blank RMS primary supplier remains unresolved even when the review
-        # mapping proposes "Other". It must be explicitly reviewed.
         result["Supplier_Mapped"] = bool(supplier) and bool(primary_supplier_key)
 
         mapping_reasons = []
@@ -472,6 +471,7 @@ def analyze_candidates(
 
         # Critical cutover rule: RMS quantity must never become Lightspeed opening stock.
         result["Opening_Inventory_To_Import"] = 0
+        result["Migration_Tags"] = "Aging Stock" if bool(result.get("aging_stock")) else ""
 
         rows.append(result)
 
