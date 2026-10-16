@@ -101,35 +101,20 @@ def _identity_tokens(value) -> set[str]:
 
 def web_description_is_trusted(row: pd.Series) -> bool:
     """
-    Decide whether the legacy Web Description is safe to use as the Lightspeed
-    family name.
+    Treat RMS WebDescription as the authoritative expanded product title when
+    it is present.
 
-    RMS Description is heavily abbreviated, so lack of a direct word-for-word
-    match is not a hard identity failure. ExtendedDescription is also used as
-    corroborating source text. When the web title cannot be corroborated, the
-    migration falls back to RMS Description and records a non-blocking warning.
+    Hobby Corner intentionally uses WebDescription to work around the RMS Item
+    Description character limit, so legitimate titles may have little or no
+    token overlap with the abbreviated RMS Description (for example MTG ->
+    Magic the Gathering).
+
+    Product identity safety is enforced separately by hard identifier gates
+    such as barcode_identity_conflict and source_product_code_collision. Rows
+    with those conflicts are REVIEW and never reach a controlled write batch.
     """
     web = "" if pd.isna(row.get("RMS_WebDescription")) else str(row.get("RMS_WebDescription")).strip()
-    if not web:
-        return False
-
-    source_text = " ".join(
-        str(value).strip()
-        for value in [row.get("RMS_Description"), row.get("ExtendedDescription")]
-        if value is not None and not pd.isna(value) and str(value).strip()
-    )
-    source_tokens = _identity_tokens(source_text)
-    web_tokens = _identity_tokens(web)
-    if source_tokens and web_tokens and (source_tokens & web_tokens):
-        return True
-
-    # Character similarity catches common RMS abbreviations where tokenization
-    # does not, without allowing an unrelated title to become authoritative.
-    from difflib import SequenceMatcher
-    rms_description = "" if pd.isna(row.get("RMS_Description")) else str(row.get("RMS_Description")).strip()
-    left = re.sub(r"[^a-z0-9]+", "", norm(rms_description))
-    right = re.sub(r"[^a-z0-9]+", "", norm(web))
-    return bool(left and right and SequenceMatcher(None, left, right).ratio() >= 0.50)
+    return bool(web)
 
 
 def _valid_gtin(value) -> bool:
