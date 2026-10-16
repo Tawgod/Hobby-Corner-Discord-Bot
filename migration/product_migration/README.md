@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v49`.
+As of 2026-10-16, the audited notebook version is `2026-10-16-v50`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -219,3 +219,13 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Controlled writes therefore use a live legacy product API adapter: duplicate lookup and create/read-back use `/api/2.0/products`, with standard-product fields translated at write time.
 - Image upload uses the supported legacy `/api/2.0/products/{product_id}/actions/image_upload` endpoint.
 - Failed test rows with `Status=ERROR` are not treated as previously migrated SKUs and remain eligible for future batches.
+
+
+## Supplier, category, Games Workshop, and aging-stock policy
+
+- A named RMS supplier with no explicit migration mapping falls back to the canonical Lightspeed supplier `Other`. Blank RMS primary suppliers remain review-only.
+- Exact retained/current supplier names still take precedence over `Other`.
+- Games Workshop is no longer blanket-routed to REVIEW. Its products follow the same category/supplier/product rules as everything else; genuine barcode or source-code collisions still trigger REVIEW.
+- Aging inventory with positive RMS quantity and no reliable sale within 12 months receives the migration tag `Aging Stock`. This is not itself a review flag.
+- The `Aging Stock` Lightspeed tag is resolved/created only if a selected live-write product actually needs it, and its tag ID is sent in the product create payload.
+- Added explicit category mappings for blank-category `Outdoor Toys -> Toys > Outdoor Toys` and `Other > Clothing -> General > Clothing`.
