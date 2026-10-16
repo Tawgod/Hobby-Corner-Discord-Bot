@@ -83,6 +83,83 @@ def boolish(value) -> bool:
     return str(value).strip().casefold() in {"1", "true", "yes", "y"}
 
 
+IDENTITY_STOPWORDS = {
+    "the", "and", "for", "with", "from", "pack", "set", "box", "game",
+    "model", "edition", "new", "of", "a", "an", "to", "in"
+}
+
+
+def _identity_tokens(value) -> set[str]:
+    text = norm(value)
+    if not text:
+        return set()
+    return {
+        token for token in re.findall(r"[a-z0-9]+", text)
+        if len(token) >= 3 and token not in IDENTITY_STOPWORDS
+    }
+
+
+def _valid_gtin(value) -> bool:
+    raw = "" if value is None or pd.isna(value) else str(value).strip()
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) not in {8, 12, 13, 14}:
+        return False
+    nums = [int(x) for x in digits]
+    total = 0
+    for idx, digit in enumerate(reversed(nums[:-1])):
+        total += digit * (3 if idx % 2 == 0 else 1)
+    return ((10 - (total % 10)) % 10) == nums[-1]
+
+
+def source_identity_review_flags(row: pd.Series) -> list[str]:
+    """
+    Catch mixed-source RMS rows before they are eligible for product creation.
+
+    The legacy NitroSell/PAM web-description table can contain records whose
+    ItemID does not describe the same product as the current RMS Item row.
+    Likewise, old Alias rows can contain a barcode belonging to another item.
+    These conditions are review gates, never automatic corrections.
+    """
+    flags: list[str] = []
+
+    desc = row.get("RMS_Description")
+    web = row.get("RMS_WebDescription")
+    desc_tokens = _identity_tokens(desc)
+    web_tokens = _identity_tokens(web)
+    if len(desc_tokens) >= 2 and len(web_tokens) >= 2 and not (desc_tokens & web_tokens):
+        flags.append("web_description_identity_conflict")
+
+    sku = "" if pd.isna(row.get("RMS_SKU")) else str(row.get("RMS_SKU")).strip()
+    upc = "" if pd.isna(row.get("RMS_UPC")) else str(row.get("RMS_UPC")).strip()
+    aliases = "" if pd.isna(row.get("RMS_Aliases")) else str(row.get("RMS_Aliases")).strip()
+
+    # Some RMS item lookup codes are UPC-A values stored without the leading 0.
+    # When that reconstructs to a valid GTIN and conflicts with another valid
+    # barcode attached to the row, stop for review instead of guessing.
+    sku_digits = re.sub(r"\D", "", sku)
+    inferred_sku_gtin = ""
+    if sku.isdigit():
+        if len(sku_digits) == 11 and _valid_gtin("0" + sku_digits):
+            inferred_sku_gtin = "0" + sku_digits
+        elif len(sku_digits) in {8, 12, 13, 14} and _valid_gtin(sku_digits):
+            inferred_sku_gtin = sku_digits
+
+    candidate_codes = []
+    for raw in [upc, *aliases.split("|")]:
+        code = re.sub(r"\D", "", str(raw).strip())
+        if not code:
+            continue
+        if len(code) == 11 and _valid_gtin("0" + code):
+            code = "0" + code
+        if _valid_gtin(code):
+            candidate_codes.append(code)
+
+    if inferred_sku_gtin and any(code != inferred_sku_gtin for code in candidate_codes):
+        flags.append("barcode_identity_conflict")
+
+    return flags
+
+
 def find_category_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame]:
     for name, df in worksheets.items():
         headers = {str(c).strip() for c in df.columns}
@@ -220,6 +297,12 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
 
     RMS_Supplier is sourced from Item.SupplierID (the RMS primary supplier).
     This mapping must never be applied to secondary SupplierList relationships.
+
+    Safety rule:
+    - A blank-disposition mapping to "Other" is treated as unresolved legacy
+      review data, not as an approved supplier conversion.
+    - Explicitly approved mappings (for example Disposition=MAP) are honored.
+    - The blank-RMS-supplier review row may still map to Other.
     """
     out = {}
     for _, row in df.iterrows():
@@ -232,9 +315,13 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
         if not target:
             continue
 
-        # The review sheet represents blank RMS primary suppliers with a readable
-        # sentinel label. Convert it back to the actual blank-source key.
         source = "" if norm(source_raw) == "(blank rms supplier)" else norm(source_raw)
+
+        # Do not silently collapse a named RMS supplier to Other unless that
+        # choice was explicitly reviewed/approved in the mapping sheet.
+        if norm(target) == "other" and source and not disposition:
+            continue
+
         out[source] = target
     return out
 
@@ -302,19 +389,32 @@ def analyze_candidates(
         # secondary SupplierList relationships for supplier mapping.
         primary_supplier_key = norm(row.get("RMS_Supplier"))
         supplier = supplier_map.get(primary_supplier_key, "")
-        if not supplier:
-            supplier = DEFAULT_UNMAPPED_PRIMARY_SUPPLIER
-            result["Supplier_Fallback_Applied"] = True
-        else:
-            result["Supplier_Fallback_Applied"] = False
+        result["Supplier_Fallback_Applied"] = False
         result["LS_Supplier"] = supplier
         result["Supplier_Mapped"] = bool(supplier)
 
         mapping_reasons = []
         if not category_path and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
-        # Unmapped primary suppliers are intentionally redirected to the
-        # canonical Lightspeed "Other" supplier so they do not block migration.
+        if not supplier:
+            mapping_reasons.append("Unmapped supplier")
+
+        identity_flags = source_identity_review_flags(row)
+        if identity_flags:
+            existing_flags = [
+                x for x in str(result.get("Migration_Review_Flags", "")).split(",")
+                if x
+            ]
+            result["Migration_Review_Flags"] = ",".join(
+                dict.fromkeys([*existing_flags, *identity_flags])
+            )
+            mapping_reasons.extend(
+                {
+                    "web_description_identity_conflict": "Web description does not appear to match RMS item identity",
+                    "barcode_identity_conflict": "Conflicting valid barcode identity on RMS row",
+                }[flag]
+                for flag in identity_flags
+            )
 
         if mapping_reasons and decision.migration_status != "EXCLUDE":
             result["migration_status"] = "REVIEW"
