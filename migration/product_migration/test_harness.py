@@ -1913,7 +1913,7 @@ def set_and_verify_reorder_points(
         "User-Agent": "HobbyCorner-ProductMigration/1.0",
     }
 
-    def read_inventory() -> Dict[str, Any]:
+    def read_inventory(*, require_record: bool) -> Optional[Dict[str, Any]]:
         res = requests.post(
             f"{base_host}/api/2026-04/inventory",
             headers=headers,
@@ -1938,14 +1938,24 @@ def set_and_verify_reorder_points(
             ),
             None,
         )
-        if not row:
+        if require_record and not row:
             raise RuntimeError(
-                f"No inventory record found for product {product_id} at outlet {outlet_id}."
+                f"No inventory record found after reorder upsert for product {product_id} "
+                f"at outlet {outlet_id}."
             )
         return row
 
-    before = read_inventory()
-    before_qty = before.get("current_inventory_level")
+    # A newly created zero-opening-stock product may not have an inventory row
+    # until an outlet-specific inventory setting is first written. That is not
+    # an error: the reorder-point endpoint is an upsert. Treat a missing
+    # pre-write record as zero on hand, then require/read back the materialized
+    # row after the reorder write.
+    before = read_inventory(require_record=False)
+    before_qty = (
+        before.get("current_inventory_level")
+        if before is not None
+        else 0
+    )
 
     payload = [{
         "product_id": product_id,
@@ -1964,7 +1974,7 @@ def set_and_verify_reorder_points(
     if not write.ok:
         raise RuntimeError(f"Reorder update failed {write.status_code}: {write.text[:1000]}")
 
-    after = read_inventory()
+    after = read_inventory(require_record=True)
     after_qty = after.get("current_inventory_level")
 
     result = {
@@ -1975,6 +1985,7 @@ def set_and_verify_reorder_points(
         "Reorder Method": after.get("reorder_method"),
         "Reorder Point": after.get("reorder_point"),
         "Reorder Target": after.get("reorder_target"),
+        "Inventory Record Existed Before": before is not None,
         "Inventory Before": before_qty,
         "Inventory After": after_qty,
         "Inventory Unchanged": before_qty == after_qty,
