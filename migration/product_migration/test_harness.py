@@ -236,9 +236,31 @@ def audit_and_reconcile_category_catalog(
                 f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
             )
         body = res.json()
-        data = body.get("data", {}) if isinstance(body, dict) else {}
-        rows = data.get("categories", []) if isinstance(data, dict) else []
-        return [x for x in rows if isinstance(x, dict)]
+        if isinstance(body, list):
+            rows = body
+        elif isinstance(body, dict):
+            data = body.get("data", body)
+            if isinstance(data, list):
+                rows = data
+            elif isinstance(data, dict):
+                rows = (
+                    data.get("categories")
+                    or data.get("items")
+                    or data.get("product_categories")
+                    or []
+                )
+            else:
+                rows = []
+        else:
+            rows = []
+
+        rows = [x for x in rows if isinstance(x, dict)]
+        if not rows:
+            raise RuntimeError(
+                "Lightspeed category audit returned zero parseable categories. "
+                f"Response shape/type: {type(body).__name__}; refusing to replace Cat ID."
+            )
+        return rows
 
     def path_for(item: Dict[str, Any]) -> str:
         category_path = item.get("category_path") or []
@@ -390,8 +412,17 @@ def audit_and_reconcile_category_catalog(
             "Level 3": parts[2] if len(parts) > 2 else "",
             "UUID": uid,
         })
+    if not canonical_rows:
+        raise RuntimeError(
+            "Lightspeed category audit parsed categories but could not reconstruct "
+            "any category paths/UUIDs. Refusing to replace Cat ID."
+        )
+    canonical_df = pd.DataFrame(
+        canonical_rows,
+        columns=["Level 1", "Level 2", "Level 3", "UUID"],
+    )
     canonical_df = (
-        pd.DataFrame(canonical_rows)
+        canonical_df
         .drop_duplicates(subset=["Level 1", "Level 2", "Level 3", "UUID"])
         .sort_values(["Level 1", "Level 2", "Level 3"], kind="stable")
         .reset_index(drop=True)
@@ -463,9 +494,31 @@ def resolve_category_uuids_from_api(
                 f"Lightspeed category lookup failed {res.status_code}: {res.text[:1000]}"
             )
         body = res.json()
-        data = body.get("data", {}) if isinstance(body, dict) else {}
-        rows = data.get("categories", []) if isinstance(data, dict) else []
-        return [x for x in rows if isinstance(x, dict)]
+        if isinstance(body, list):
+            rows = body
+        elif isinstance(body, dict):
+            data = body.get("data", body)
+            if isinstance(data, list):
+                rows = data
+            elif isinstance(data, dict):
+                rows = (
+                    data.get("categories")
+                    or data.get("items")
+                    or data.get("product_categories")
+                    or []
+                )
+            else:
+                rows = []
+        else:
+            rows = []
+
+        rows = [x for x in rows if isinstance(x, dict)]
+        if not rows:
+            raise RuntimeError(
+                "Lightspeed category audit returned zero parseable categories. "
+                f"Response shape/type: {type(body).__name__}; refusing to replace Cat ID."
+            )
+        return rows
 
     def path_for(item: Dict[str, Any]) -> str:
         category_path = item.get("category_path") or []
