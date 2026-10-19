@@ -269,3 +269,11 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 ### v60 category mapping source hardening
 - The `Mapping` tab is now explicitly authoritative for RMS Department/Category -> Lightspeed category paths instead of relying on first-match sheet discovery.
 - Setup prints the selected category mapping tab, entry count, and a regression probe requiring `Trains + HO Scale -> Classic Hobby > Trains > HO Scale`.
+
+
+### v63 migration workspace centralization
+- Operational migration tabs now live in the dedicated Flagged Migration workbook rather than `LS: importer`.
+- `LS: importer` remains the authority for category/supplier/brand mapping and UUID reference data.
+- Preserved in Flagged Migration: Migration Run Results, Migration Run History, Migration Failure Review, and Category UUID Audit.
+- Current review/gap/test tabs are clean workspaces and are replaced by their owning notebook cells.
+- Added a Migration Guide tab describing which tabs are current snapshots versus append-only history.
