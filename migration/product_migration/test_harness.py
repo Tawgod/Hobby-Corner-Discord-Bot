@@ -1418,7 +1418,7 @@ def build_standard_family_payload(
         raise ValueError("Missing product name.")
     if not sku:
         raise ValueError(f"{name}: missing SKU/code.")
-    if not re.fullmatch(r"[a-zA-Z0-9_/()#\\-|.]+", sku):
+    if not re.fullmatch(r"[a-zA-Z0-9_/()#|.\\-]+", sku):
         raise ValueError(
             f"{sku}: SKU contains characters Lightspeed does not accept. "
             "Allowed characters are letters, numbers, _, /, (, ), #, -, |, and ."
