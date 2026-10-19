@@ -173,6 +173,17 @@ def source_identity_review_flags(row: pd.Series) -> list[str]:
 
 
 def find_category_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame]:
+    # Hobby Corner's authoritative RMS Department/Category -> Lightspeed path
+    # table is the tab literally named "Mapping". Prefer it explicitly rather
+    # than relying on workbook order or a look-alike helper sheet.
+    preferred = worksheets.get("Mapping")
+    if preferred is not None:
+        headers = {str(c).strip() for c in preferred.columns}
+        if CATEGORY_REQUIRED.issubset(headers) and any(
+            str(c).strip().startswith(CATEGORY_LS_PREFIX) for c in preferred.columns
+        ):
+            return "Mapping", preferred
+
     for name, df in worksheets.items():
         headers = {str(c).strip() for c in df.columns}
         if CATEGORY_REQUIRED.issubset(headers) and any(
