@@ -1421,6 +1421,7 @@ def execute_controlled_product_write(
         "Price Verified": False,
         "Weight Verified": False,
         "Active Verified": False,
+        "Inventory Tracking Verified": False,
         "Product Fields Verified": False,
         "Image Requested": bool(picture_path),
         "Image Uploaded": False,
@@ -1446,6 +1447,7 @@ def execute_controlled_product_write(
         "name": _text(payload.get("name")),
         "sku": sku,
         "is_active": bool((product.get("active") or {}).get("in_store", True)),
+        "has_inventory": bool(payload.get("track_inventory", True)),
     }
     if _text(payload.get("description")):
         legacy_payload["description"] = _text(payload.get("description"))
@@ -1628,6 +1630,9 @@ def execute_controlled_product_write(
         if actual_active is None:
             actual_active = data.get("active")
         result["Active Verified"] = bool(actual_active) == bool(legacy_payload.get("is_active"))
+        result["Inventory Tracking Verified"] = (
+            bool(data.get("has_inventory")) == bool(legacy_payload.get("has_inventory"))
+        )
 
         result["Product Fields Verified"] = all([
             result["Name Verified"],
@@ -1639,6 +1644,7 @@ def execute_controlled_product_write(
             result["Price Verified"],
             result["Weight Verified"],
             result["Active Verified"],
+            result["Inventory Tracking Verified"],
         ])
 
         images = data.get("images") or []
@@ -1666,6 +1672,7 @@ def execute_controlled_product_write(
                 ("price", result["Price Verified"]),
                 ("weight", result["Weight Verified"]),
                 ("active", result["Active Verified"]),
+                ("inventory tracking", result["Inventory Tracking Verified"]),
             ]
             if not ok
         ]
@@ -1694,20 +1701,20 @@ def execute_controlled_batch(
     api_domain: str,
     token: str,
     image_search_roots: Iterable[str] = (),
-    max_writes: int = 50,
+    max_writes: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Execute the configured test batch and return one result row per item.
 
     max_writes is the explicit user-configured guardrail.
     """
-    if max_writes <= 0:
+    if max_writes is not None and max_writes <= 0:
         raise ValueError("Configured product-write limit must be greater than zero.")
     if len(payloads) != len(preview):
         raise ValueError("Preview/payload row counts do not match.")
-    if len(payloads) > max_writes:
+    if max_writes is not None and len(payloads) > max_writes:
         raise ValueError(
-            f"Controlled test contains {len(payloads)} products; configured limit is {max_writes}."
+            f"Controlled test contains {len(payloads)} products; configured batch size is {max_writes}."
         )
 
     results = []
@@ -1875,6 +1882,71 @@ def repair_test_batch_images(
     return pd.DataFrame(repaired)
 
 
+def ensure_inventory_tracking_enabled(
+    product_id: str,
+    *,
+    api_domain: str,
+    token: str,
+    timeout: int = 45,
+) -> Dict[str, Any]:
+    """Enable and verify inventory tracking for a product before reorder writes."""
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    product_id = _text(product_id)
+    if not domain or not auth_token or not product_id:
+        raise ValueError("Domain, token, and product_id are required.")
+
+    base_host = domain.rstrip("/") if domain.startswith(("http://", "https://")) else f"https://{domain}.retail.lightspeed.app"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    def read_product() -> Dict[str, Any]:
+        res = requests.get(
+            f"{base_host}/api/2.0/products/{product_id}",
+            headers=headers,
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Product inventory-tracking read failed {res.status_code}: {res.text[:1000]}"
+            )
+        body = res.json()
+        return body.get("data", body) if isinstance(body, dict) else {}
+
+    before = read_product()
+    was_enabled = bool(before.get("has_inventory"))
+    if not was_enabled:
+        update = requests.put(
+            f"{base_host}/api/2.1/products/{product_id}",
+            headers=headers,
+            json={"common": {"track_inventory": True}},
+            timeout=timeout,
+        )
+        if not update.ok:
+            raise RuntimeError(
+                f"Enable inventory tracking failed {update.status_code}: {update.text[:1000]}"
+            )
+
+    after = read_product()
+    enabled = bool(after.get("has_inventory"))
+    if not enabled:
+        raise RuntimeError(
+            f"Inventory tracking did not read back enabled for product {product_id}."
+        )
+
+    return {
+        "Inventory Tracking Was Enabled": was_enabled,
+        "Inventory Tracking Enabled": enabled,
+        "Inventory Tracking Repaired": (not was_enabled and enabled),
+    }
+
+
 def set_and_verify_reorder_points(
     product_id: str,
     *,
@@ -1913,6 +1985,13 @@ def set_and_verify_reorder_points(
         "Content-Type": "application/json",
         "User-Agent": "HobbyCorner-ProductMigration/1.0",
     }
+
+    tracking_result = ensure_inventory_tracking_enabled(
+        product_id,
+        api_domain=api_domain,
+        token=token,
+        timeout=timeout,
+    )
 
     def read_inventory(*, require_record: bool) -> Optional[Dict[str, Any]]:
         res = requests.post(
@@ -1980,6 +2059,7 @@ def set_and_verify_reorder_points(
 
     result = {
         "Product ID": product_id,
+        **tracking_result,
         "Outlet ID": outlet_id,
         "Requested Reorder Point": float(reorder_point),
         "Requested Restock Level": float(restock_level),
@@ -2012,7 +2092,7 @@ def apply_controlled_reorder_batch(
     api_domain: str,
     token: str,
     outlet_id: str,
-    max_writes: int = 50,
+    max_writes: Optional[int] = None,
 ) -> pd.DataFrame:
     """
     Apply proposed reorder/restock values to an existing controlled test batch.
@@ -2023,11 +2103,11 @@ def apply_controlled_reorder_batch(
       - Reorder Point Proposed
       - Restock Level Proposed
     """
-    if max_writes <= 0:
+    if max_writes is not None and max_writes <= 0:
         raise ValueError("Configured reorder-write limit must be greater than zero.")
-    if len(rows) > max_writes:
+    if max_writes is not None and len(rows) > max_writes:
         raise ValueError(
-            f"Controlled reorder test contains {len(rows)} rows; configured limit is {max_writes}."
+            f"Controlled reorder test contains {len(rows)} rows; configured batch size is {max_writes}."
         )
 
     out = []
