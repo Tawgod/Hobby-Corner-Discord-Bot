@@ -894,14 +894,18 @@ def resolve_brand_uuids_from_api(
     token: str,
     create_missing: bool = False,
     timeout: int = 45,
-) -> Tuple[Dict[str, str], Dict[str, str], List[str], List[Dict[str, str]]]:
+) -> Tuple[Dict[str, str], Dict[str, str], List[str], List[Dict[str, str]], pd.DataFrame]:
     """
-    Resolve brand UUIDs by exact normalized Lightspeed brand name.
+    Reconcile brand UUIDs against the full live Lightspeed brand catalog.
 
-    When create_missing=True, create only names that do not already have an
-    exact normalized match, then re-read Lightspeed and verify the resulting
-    UUID. This never renames, merges, or deletes an existing brand.
+    Exact normalized name is authoritative. Cached UUIDs are revalidated and
+    replaced when the same live brand name has a different UUID. Missing names
+    receive near-name suggestions for review; suggestions are never auto-applied.
+
+    When create_missing=True, create only names that still have no exact live
+    match, then re-read Lightspeed and verify the resulting UUID.
     """
+    import difflib
     import requests
 
     domain = _text(api_domain)
@@ -924,22 +928,28 @@ def resolve_brand_uuids_from_api(
     wanted = {
         _norm(name): _text(name)
         for name in brand_names
-        if _text(name) and _norm(name) not in brand_uuid_map
+        if _text(name)
     }
     if not wanted:
-        return dict(brand_uuid_map), {}, [], []
+        return (
+            dict(brand_uuid_map), {}, [], [],
+            pd.DataFrame(columns=[
+                "Brand Name", "Status", "Cached UUID", "Live UUID", "Near Live Matches"
+            ]),
+        )
 
     def list_brands() -> List[Dict[str, Any]]:
-        # Lightspeed collection pagination is version-cursor based. Brand count
-        # can exceed 1000 after migration cleanup, so read every page.
         rows: List[Dict[str, Any]] = []
         after = 0
         seen_after = set()
         while True:
+            params = {"page_size": 1000, "deleted": "false"}
+            if after:
+                params["after"] = after
             res = requests.get(
                 f"{base_host}/api/2026-04/brands",
                 headers=headers,
-                params={"page_size": 1000, "deleted": "false", "after": after},
+                params=params,
                 timeout=timeout,
             )
             if not res.ok:
@@ -967,7 +977,6 @@ def resolve_brand_uuids_from_api(
                     default=None,
                 )
             if max_version is None:
-                # A full page without a cursor cannot be safely assumed complete.
                 if len(page) >= 1000:
                     raise RuntimeError(
                         "Lightspeed brand list returned a full page without a pagination cursor."
@@ -978,25 +987,33 @@ def resolve_brand_uuids_from_api(
                 raise RuntimeError("Lightspeed brand pagination cursor did not advance.")
             seen_after.add(after)
             after = next_after
-
         return rows
 
-    def index_brands(rows: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    def index_brands(rows: List[Dict[str, Any]]) -> Tuple[
+        Dict[str, List[Dict[str, Any]]], Dict[str, str]
+    ]:
         by_name: Dict[str, List[Dict[str, Any]]] = {}
+        display: Dict[str, str] = {}
         for item in rows:
             name = _text(item.get("name"))
             uid = _text(item.get("id") or item.get("brand_id"))
             if name and uid:
-                by_name.setdefault(_norm(name), []).append(item)
-        return by_name
+                key = _norm(name)
+                by_name.setdefault(key, []).append(item)
+                display.setdefault(key, name)
+        return by_name, display
 
     out = dict(brand_uuid_map)
     resolved: Dict[str, str] = {}
     created: List[Dict[str, str]] = []
-    by_name = index_brands(list_brands())
+    rows = list_brands()
+    by_name, live_display = index_brands(rows)
+    live_keys = sorted(by_name)
     still_missing: Dict[str, str] = {}
+    audit_rows: List[Dict[str, str]] = []
 
     for key, display_name in wanted.items():
+        cached_uuid = _text(out.get(key))
         matches = by_name.get(key, [])
         ids = sorted({
             _text(item.get("id") or item.get("brand_id"))
@@ -1004,10 +1021,33 @@ def resolve_brand_uuids_from_api(
             if _text(item.get("id") or item.get("brand_id"))
         })
         if len(ids) == 1:
-            out[key] = ids[0]
-            resolved[display_name] = ids[0]
+            live_uuid = ids[0]
+            status = "MATCH" if cached_uuid == live_uuid else (
+                "UUID_MISMATCH" if cached_uuid else "MISSING_FROM_CACHE"
+            )
+            out[key] = live_uuid
+            if cached_uuid != live_uuid:
+                resolved[display_name] = live_uuid
+            audit_rows.append({
+                "Brand Name": display_name,
+                "Status": status,
+                "Cached UUID": cached_uuid,
+                "Live UUID": live_uuid,
+                "Near Live Matches": "",
+            })
         else:
             still_missing[key] = display_name
+            close_keys = difflib.get_close_matches(key, live_keys, n=5, cutoff=0.72)
+            audit_rows.append({
+                "Brand Name": display_name,
+                "Status": "DUPLICATE_LIVE_NAME" if len(ids) > 1 else "NAME_NOT_FOUND",
+                "Cached UUID": cached_uuid,
+                "Live UUID": " | ".join(ids),
+                "Near Live Matches": " | ".join(
+                    live_display.get(match_key, match_key)
+                    for match_key in close_keys
+                ),
+            })
 
     if create_missing and still_missing:
         for key, display_name in list(still_missing.items()):
@@ -1030,9 +1070,8 @@ def resolve_brand_uuids_from_api(
                 if isinstance(data, dict) else "",
             })
 
-        # Read-back is authoritative and also protects against response-shape
-        # differences between Lightspeed versions.
-        by_name = index_brands(list_brands())
+        rows = list_brands()
+        by_name, live_display = index_brands(rows)
         for key, display_name in list(still_missing.items()):
             matches = by_name.get(key, [])
             ids = sorted({
@@ -1041,11 +1080,25 @@ def resolve_brand_uuids_from_api(
                 if _text(item.get("id") or item.get("brand_id"))
             })
             if len(ids) == 1:
-                out[key] = ids[0]
-                resolved[display_name] = ids[0]
+                live_uuid = ids[0]
+                out[key] = live_uuid
+                resolved[display_name] = live_uuid
                 still_missing.pop(key, None)
+                for audit_row in audit_rows:
+                    if _norm(audit_row.get("Brand Name")) == key:
+                        audit_row["Status"] = "CREATED_VERIFIED"
+                        audit_row["Live UUID"] = live_uuid
+                        audit_row["Near Live Matches"] = ""
+                        break
 
-    return out, resolved, sorted(still_missing.values()), created
+    return (
+        out,
+        resolved,
+        sorted(still_missing.values()),
+        created,
+        pd.DataFrame(audit_rows),
+    )
+
 
 
 def resolve_supplier_uuids_from_api(
