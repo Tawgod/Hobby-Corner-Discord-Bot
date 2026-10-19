@@ -330,10 +330,10 @@ def build_supplier_map(df: pd.DataFrame, source_col: str, target_col: str) -> di
 
     Supplier fallback rule:
     - Explicit mappings are honored.
-    - Named suppliers mapped to "Other" are valid fallbacks even when disposition
-      is blank; "Other" is the intentional catch-all supplier for migration.
-    - A blank RMS primary supplier remains distinct from an unmapped named supplier
-      and is still reviewed separately.
+    - Any blank or unmapped RMS primary supplier falls back to the canonical
+      Lightspeed supplier named "Other".
+    - "Other" is an intentional catch-all migration supplier, not a review-only
+      placeholder. Its UUID is reconciled against live Lightspeed during setup.
     """
     out = {}
     for _, row in df.iterrows():
@@ -474,17 +474,17 @@ def analyze_candidates(
             )
 
         # RMS_Supplier is the primary supplier from Item.SupplierID. Do not use
-        # secondary SupplierList relationships for supplier mapping.
+        # secondary SupplierList relationships for supplier mapping. Hobby
+        # Corner intentionally uses the Lightspeed supplier "Other" whenever
+        # the RMS primary supplier is blank or has no explicit mapping.
         primary_supplier_key = norm(row.get("RMS_Supplier"))
         supplier = supplier_map.get(primary_supplier_key, "")
-        # A named RMS supplier with no explicit mapping falls back to the
-        # canonical "Other" supplier. Blank RMS suppliers remain review-only.
-        supplier_fallback = bool(primary_supplier_key and not supplier)
+        supplier_fallback = not bool(supplier)
         if supplier_fallback:
             supplier = "Other"
         result["Supplier_Fallback_Applied"] = supplier_fallback
         result["LS_Supplier"] = supplier
-        result["Supplier_Mapped"] = bool(supplier) and bool(primary_supplier_key)
+        result["Supplier_Mapped"] = bool(supplier)
 
         mapping_reasons = []
         if fallback_applied and not intentional_category_exclusion:
@@ -493,11 +493,6 @@ def analyze_candidates(
             )
         elif not result["Category_Mapped"] and not intentional_category_exclusion:
             mapping_reasons.append("Unmapped category")
-
-        if not primary_supplier_key:
-            mapping_reasons.append("Blank RMS supplier")
-        elif not supplier:
-            mapping_reasons.append("Unmapped supplier")
 
         web_description = "" if pd.isna(row.get("RMS_WebDescription")) else str(row.get("RMS_WebDescription")).strip()
         web_description_trusted = web_description_is_trusted(row)
