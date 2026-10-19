@@ -1340,6 +1340,11 @@ def build_standard_family_payload(
         raise ValueError("Missing product name.")
     if not sku:
         raise ValueError(f"{name}: missing SKU/code.")
+    if not re.fullmatch(r"[a-zA-Z0-9_/()#\\-|.]+", sku):
+        raise ValueError(
+            f"{sku}: SKU contains characters Lightspeed does not accept. "
+            "Allowed characters are letters, numbers, _, /, (, ), #, -, |, and ."
+        )
 
     category_id = category_uuid_map.get(_norm(category_path))
     if not category_id:
@@ -1866,6 +1871,21 @@ def execute_controlled_product_write(
         result["Product ID"] = product_id
         result["Family ID"] = product_id
 
+        # Legacy POST /api/2.0/products does not reliably persist the
+        # inventory-tracking flag even when has_inventory is supplied. The
+        # supported legacy update shape is the 2.1 common.track_inventory
+        # field. Repair/read back immediately so a successfully created
+        # product cannot be left non-tracked.
+        tracking_result = ensure_inventory_tracking_enabled(
+            product_id,
+            api_domain=api_domain,
+            token=token,
+            timeout=timeout,
+        )
+        result["Inventory Tracking Verified"] = bool(
+            tracking_result.get("Inventory Tracking Enabled")
+        )
+
         if picture_path:
             if not os.path.isfile(picture_path):
                 raise FileNotFoundError(f"Picture not found: {picture_path}")
@@ -1954,9 +1974,12 @@ def execute_controlled_product_write(
         if actual_active is None:
             actual_active = data.get("active")
         result["Active Verified"] = bool(actual_active) == bool(legacy_payload.get("is_active"))
-        result["Inventory Tracking Verified"] = (
-            bool(data.get("has_inventory")) == bool(legacy_payload.get("has_inventory"))
-        )
+        # Inventory tracking was separately repaired and verified via
+        # PUT /api/2.1/products/{id} common.track_inventory above. Keep that
+        # authoritative result rather than treating POST /api/2.0's ignored
+        # has_inventory field as the source of truth.
+        if not result["Inventory Tracking Verified"]:
+            result["Inventory Tracking Verified"] = bool(data.get("has_inventory"))
 
         result["Product Fields Verified"] = all([
             result["Name Verified"],
