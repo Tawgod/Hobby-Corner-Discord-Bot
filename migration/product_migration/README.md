@@ -293,3 +293,16 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Example: `Games > Trading Card Games` becomes `Games > Trading Card Games > Other Trading Card Games`.
 - Existing explicit level-3 mappings always win and are never replaced by this fallback.
 - Missing fallback leaves are created only through the existing safe category reconciliation flow, then re-read and verified before the in-memory category map is changed.
+
+
+### v66 pre-test migration hardening
+- Blank or unmapped RMS primary suppliers now intentionally use the live Lightspeed supplier named `Other`; explicit mappings to `Other` are no longer overridden by names found only in the supplier template.
+- Supplier UUIDs, including `Other`, are reconciled by exact normalized name against the full live supplier catalog before preview/write.
+- Brand UUIDs are now reconciled for every used canonical brand, including stale cached UUID correction and near-name diagnostics; just-in-time brand creation remains limited to the selected controlled write batch.
+- Known products that were created by an earlier migration run but recorded in `Migration Failure Review` can be safely re-verified/repaired instead of being immediately skipped as duplicates. Other pre-existing Lightspeed products remain untouched.
+- Invalid Lightspeed SKU characters are routed to REVIEW before test selection.
+- Category creation now treats the exact full hierarchy path as authoritative; the same leaf name under a different parent no longer blocks creation.
+- Live category reads now paginate beyond 1,000 categories using the product-category ID cursor.
+- The Mapping/RMS-D&C reference was extended for safe aliases and blank-category fallbacks without breaking the Mapping spill formula.
+- After the cleanup, only five Department/Category combinations (15 candidate products) remain intentionally unresolved because one shared destination would be ambiguous.
+- Status: implemented; runtime verification pending v66 setup and a controlled test batch.
