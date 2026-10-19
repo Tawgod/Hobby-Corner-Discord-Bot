@@ -224,17 +224,6 @@ def audit_and_reconcile_category_catalog(
     }
 
     def list_categories() -> List[Dict[str, Any]]:
-        res = requests.get(
-            f"{base_host}/api/2026-07/product_categories",
-            headers=headers,
-            params={"include": "family", "page_size": 1000},
-            timeout=timeout,
-        )
-        if not res.ok:
-            raise RuntimeError(
-                f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
-            )
-        body = res.json()
         def category_rows_from(value: Any) -> List[Dict[str, Any]]:
             if isinstance(value, list):
                 return [x for x in value if isinstance(x, dict)]
@@ -249,35 +238,66 @@ def audit_and_reconcile_category_catalog(
                     return rows
 
             for key in ("categories", "items", "product_categories"):
-                nested = value.get(key)
-                rows = category_rows_from(nested)
+                rows = category_rows_from(value.get(key))
                 if rows:
                     return rows
 
-            # Some collection responses may expose category records keyed by ID.
             values = [x for x in value.values() if isinstance(x, dict)]
-            category_like = [
+            return [
                 x for x in values
                 if _text(x.get("id")) and _text(x.get("name"))
             ]
-            if category_like:
-                return category_like
-            return []
 
-        if isinstance(body, dict) and "data" in body:
-            rows = category_rows_from(body.get("data"))
-        else:
-            rows = category_rows_from(body)
+        rows: List[Dict[str, Any]] = []
+        after = ""
+        seen_after = set()
+        while True:
+            params: Dict[str, Any] = {
+                "include": "family",
+                "page_size": 1000,
+            }
+            if after:
+                params["after"] = after
 
-        if not rows:
-            top_keys = sorted(body.keys()) if isinstance(body, dict) else []
-            data_obj = body.get("data") if isinstance(body, dict) else None
-            data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
-            raise RuntimeError(
-                "Lightspeed category audit returned zero parseable categories. "
-                f"Response type={type(body).__name__}; top-level keys={top_keys}; "
-                f"data keys={data_keys}; refusing to modify Cat ID."
+            res = requests.get(
+                f"{base_host}/api/2026-07/product_categories",
+                headers=headers,
+                params=params,
+                timeout=timeout,
             )
+            if not res.ok:
+                raise RuntimeError(
+                    f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
+                )
+            body = res.json()
+            page = category_rows_from(body)
+            if not page:
+                if not rows:
+                    top_keys = sorted(body.keys()) if isinstance(body, dict) else []
+                    data_obj = body.get("data") if isinstance(body, dict) else None
+                    data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
+                    raise RuntimeError(
+                        "Lightspeed category audit returned zero parseable categories. "
+                        f"Response type={type(body).__name__}; top-level keys={top_keys}; "
+                        f"data keys={data_keys}; refusing to modify Cat ID."
+                    )
+                break
+
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+
+            next_after = _text(page[-1].get("id"))
+            if not next_after:
+                raise RuntimeError(
+                    "Lightspeed category list returned a full page without a usable "
+                    "last category ID for pagination."
+                )
+            if next_after == after or next_after in seen_after:
+                raise RuntimeError("Lightspeed category pagination cursor did not advance.")
+            seen_after.add(after)
+            after = next_after
+
         return rows
 
     def path_for(item: Dict[str, Any]) -> str:
@@ -494,17 +514,6 @@ def resolve_category_uuids_from_api(
     }
 
     def list_categories() -> List[Dict[str, Any]]:
-        res = requests.get(
-            f"{base_host}/api/2026-07/product_categories",
-            headers=headers,
-            params={"include": "family", "page_size": 1000},
-            timeout=timeout,
-        )
-        if not res.ok:
-            raise RuntimeError(
-                f"Lightspeed category lookup failed {res.status_code}: {res.text[:1000]}"
-            )
-        body = res.json()
         def category_rows_from(value: Any) -> List[Dict[str, Any]]:
             if isinstance(value, list):
                 return [x for x in value if isinstance(x, dict)]
@@ -519,35 +528,66 @@ def resolve_category_uuids_from_api(
                     return rows
 
             for key in ("categories", "items", "product_categories"):
-                nested = value.get(key)
-                rows = category_rows_from(nested)
+                rows = category_rows_from(value.get(key))
                 if rows:
                     return rows
 
-            # Some collection responses may expose category records keyed by ID.
             values = [x for x in value.values() if isinstance(x, dict)]
-            category_like = [
+            return [
                 x for x in values
                 if _text(x.get("id")) and _text(x.get("name"))
             ]
-            if category_like:
-                return category_like
-            return []
 
-        if isinstance(body, dict) and "data" in body:
-            rows = category_rows_from(body.get("data"))
-        else:
-            rows = category_rows_from(body)
+        rows: List[Dict[str, Any]] = []
+        after = ""
+        seen_after = set()
+        while True:
+            params: Dict[str, Any] = {
+                "include": "family",
+                "page_size": 1000,
+            }
+            if after:
+                params["after"] = after
 
-        if not rows:
-            top_keys = sorted(body.keys()) if isinstance(body, dict) else []
-            data_obj = body.get("data") if isinstance(body, dict) else None
-            data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
-            raise RuntimeError(
-                "Lightspeed category audit returned zero parseable categories. "
-                f"Response type={type(body).__name__}; top-level keys={top_keys}; "
-                f"data keys={data_keys}; refusing to modify Cat ID."
+            res = requests.get(
+                f"{base_host}/api/2026-07/product_categories",
+                headers=headers,
+                params=params,
+                timeout=timeout,
             )
+            if not res.ok:
+                raise RuntimeError(
+                    f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
+                )
+            body = res.json()
+            page = category_rows_from(body)
+            if not page:
+                if not rows:
+                    top_keys = sorted(body.keys()) if isinstance(body, dict) else []
+                    data_obj = body.get("data") if isinstance(body, dict) else None
+                    data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
+                    raise RuntimeError(
+                        "Lightspeed category audit returned zero parseable categories. "
+                        f"Response type={type(body).__name__}; top-level keys={top_keys}; "
+                        f"data keys={data_keys}; refusing to modify Cat ID."
+                    )
+                break
+
+            rows.extend(page)
+            if len(page) < 1000:
+                break
+
+            next_after = _text(page[-1].get("id"))
+            if not next_after:
+                raise RuntimeError(
+                    "Lightspeed category list returned a full page without a usable "
+                    "last category ID for pagination."
+                )
+            if next_after == after or next_after in seen_after:
+                raise RuntimeError("Lightspeed category pagination cursor did not advance.")
+            seen_after.add(after)
+            after = next_after
+
         return rows
 
     def path_for(item: Dict[str, Any]) -> str:
