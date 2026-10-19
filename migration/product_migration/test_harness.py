@@ -1066,19 +1066,23 @@ def resolve_supplier_uuids_from_api(
     api_domain: str,
     token: str,
     timeout: int = 45,
-) -> Tuple[Dict[str, str], Dict[str, str], List[str]]:
+) -> Tuple[Dict[str, str], Dict[str, str], List[str], pd.DataFrame]:
     """
-    Resolve missing supplier UUIDs by exact Lightspeed supplier name.
+    Reconcile supplier UUIDs against the full live Lightspeed supplier catalog.
 
-    This is read-only. It never creates or edits suppliers. Exact normalized
-    name matches only; ambiguous or missing names are returned unresolved.
+    Exact normalized name is authoritative. Cached UUIDs are never trusted
+    without live confirmation. If an exact live name has a different UUID,
+    the live UUID replaces the stale cached UUID. Missing names remain
+    unresolved and receive near-name suggestions for review; suggestions are
+    diagnostic only and are never auto-applied.
     """
+    import difflib
     import requests
 
     domain = _text(api_domain)
     auth_token = _text(token)
     if not domain or not auth_token:
-        raise ValueError("Lightspeed API domain/token are required to resolve missing supplier UUIDs.")
+        raise ValueError("Lightspeed API domain/token are required to resolve suppliers.")
 
     if domain.startswith("http://") or domain.startswith("https://"):
         base_host = domain.rstrip("/")
@@ -1094,53 +1098,127 @@ def resolve_supplier_uuids_from_api(
     wanted = {
         _norm(name): _text(name)
         for name in supplier_names
-        if _text(name) and _norm(name) not in supplier_uuid_map
+        if _text(name)
     }
     if not wanted:
-        return dict(supplier_uuid_map), {}, []
-
-    res = requests.get(
-        f"{base_host}/api/2026-07/suppliers",
-        headers=headers,
-        params={"page_size": 1000, "deleted": "false"},
-        timeout=timeout,
-    )
-    if not res.ok:
-        raise RuntimeError(
-            f"Lightspeed supplier lookup failed {res.status_code}: {res.text[:1000]}"
+        return dict(supplier_uuid_map), {}, [], pd.DataFrame(
+            columns=["Supplier Name", "Status", "Cached UUID", "Live UUID", "Near Live Matches"]
         )
 
-    body = res.json()
-    raw = body.get("data", body) if isinstance(body, dict) else body
-    if isinstance(raw, dict):
-        rows = raw.get("suppliers") or raw.get("items") or []
-    elif isinstance(raw, list):
-        rows = raw
-    else:
-        rows = []
+    def extract_rows(body: Any) -> List[Dict[str, Any]]:
+        def walk(value: Any) -> List[Dict[str, Any]]:
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+            if not isinstance(value, dict):
+                return []
+            if "data" in value:
+                rows = walk(value.get("data"))
+                if rows:
+                    return rows
+            for key in ("suppliers", "items"):
+                rows = walk(value.get(key))
+                if rows:
+                    return rows
+            vals = [x for x in value.values() if isinstance(x, dict)]
+            return [
+                x for x in vals
+                if _text(x.get("id") or x.get("supplier_id"))
+                and _text(x.get("name") or x.get("supplier_name"))
+            ]
+        return walk(body)
 
-    by_name: Dict[str, List[str]] = {}
+    rows: List[Dict[str, Any]] = []
+    after = 0
+    seen_after = set()
+    while True:
+        params = {"page_size": 1000, "deleted": "false"}
+        if after:
+            params["after"] = after
+        res = requests.get(
+            f"{base_host}/api/2026-07/suppliers",
+            headers=headers,
+            params=params,
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Lightspeed supplier lookup failed {res.status_code}: {res.text[:1000]}"
+            )
+        body = res.json()
+        page = extract_rows(body)
+        if not page:
+            break
+        rows.extend(page)
+
+        versions = [
+            item.get("version")
+            for item in page
+            if isinstance(item, dict) and item.get("version") is not None
+        ]
+        next_after = max([int(v) for v in versions], default=None)
+        if next_after is None:
+            if len(page) >= 1000:
+                raise RuntimeError(
+                    "Lightspeed supplier list returned a full page without a pagination cursor."
+                )
+            break
+        if next_after == after or next_after in seen_after:
+            raise RuntimeError("Lightspeed supplier pagination cursor did not advance.")
+        seen_after.add(after)
+        after = next_after
+
+    by_name: Dict[str, List[Tuple[str, str]]] = {}
+    live_display: Dict[str, str] = {}
     for item in rows:
-        if not isinstance(item, dict):
-            continue
         name = _text(item.get("name") or item.get("supplier_name"))
         uid = _text(item.get("id") or item.get("supplier_id"))
         if name and uid:
-            by_name.setdefault(_norm(name), []).append(uid)
+            key = _norm(name)
+            by_name.setdefault(key, []).append((uid, name))
+            live_display.setdefault(key, name)
 
     out = dict(supplier_uuid_map)
-    resolved: Dict[str, str] = {}
+    corrected: Dict[str, str] = {}
     unresolved: List[str] = []
+    audit_rows: List[Dict[str, str]] = []
+    live_keys = sorted(by_name)
 
     for key, display_name in wanted.items():
-        matches = sorted(set(by_name.get(key, [])))
-        if len(matches) == 1:
-            out[key] = matches[0]
-            resolved[display_name] = matches[0]
-        else:
-            unresolved.append(display_name)
+        cached_uuid = _text(out.get(key))
+        ids = sorted({uid for uid, _ in by_name.get(key, []) if uid})
+        if len(ids) == 1:
+            live_uuid = ids[0]
+            status = "MATCH" if cached_uuid == live_uuid else (
+                "UUID_MISMATCH" if cached_uuid else "MISSING_FROM_CACHE"
+            )
+            out[key] = live_uuid
+            if cached_uuid != live_uuid:
+                corrected[display_name] = live_uuid
+            audit_rows.append({
+                "Supplier Name": display_name,
+                "Status": status,
+                "Cached UUID": cached_uuid,
+                "Live UUID": live_uuid,
+                "Near Live Matches": "",
+            })
+            continue
 
-    return out, resolved, unresolved
+        unresolved.append(display_name)
+        close_keys = difflib.get_close_matches(key, live_keys, n=5, cutoff=0.72)
+        suggestions = " | ".join(
+            live_display.get(match_key, match_key)
+            for match_key in close_keys
+        )
+        audit_rows.append({
+            "Supplier Name": display_name,
+            "Status": "DUPLICATE_LIVE_NAME" if len(ids) > 1 else "NAME_NOT_FOUND",
+            "Cached UUID": cached_uuid,
+            "Live UUID": " | ".join(ids),
+            "Near Live Matches": suggestions,
+        })
+
+    return out, corrected, sorted(unresolved), pd.DataFrame(audit_rows)
+
 
 
 def select_test_batch(
