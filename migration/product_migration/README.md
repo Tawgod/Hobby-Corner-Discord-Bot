@@ -277,3 +277,12 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Preserved in Flagged Migration: Migration Run Results, Migration Run History, Migration Failure Review, and Category UUID Audit.
 - Current review/gap/test tabs are clean workspaces and are replaced by their owning notebook cells.
 - Added a Migration Guide tab describing which tabs are current snapshots versus append-only history.
+
+
+### v64 failure-prevention hardening
+- Controlled product creates now immediately repair and verify inventory tracking through legacy `PUT /api/2.1/products/{id}` using `common.track_inventory=true` before final product verification.
+- Product payload building rejects SKUs containing characters outside Lightspeed's accepted SKU pattern before any API write.
+- Live Cat ID hierarchy is split into leaf and parent paths; mappings to parent categories are moved to REVIEW and parent UUIDs are excluded from the payload UUID map.
+- Added `Category Leaf Audit` to the Flagged Migration workbook.
+- Supplier UUID resolution now audits every mapped supplier against the full paginated live Lightspeed supplier catalog, corrects stale cached UUIDs on exact-name matches, and reports near-name suggestions for unresolved suppliers without auto-mapping them.
+- Added `Supplier UUID Audit` to the Flagged Migration workbook.
