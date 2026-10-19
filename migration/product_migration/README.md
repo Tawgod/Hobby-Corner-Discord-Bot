@@ -286,3 +286,10 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Added `Category Leaf Audit` to the Flagged Migration workbook.
 - Supplier UUID resolution now audits every mapped supplier against the full paginated live Lightspeed supplier catalog, corrects stale cached UUIDs on exact-name matches, and reports near-name suggestions for unresolved suppliers without auto-mapping them.
 - Added `Supplier UUID Audit` to the Flagged Migration workbook.
+
+
+### v65 parent-category fallback restoration
+- If an RMS mapping has no explicit level-3 destination and its mapped Lightspeed path is a parent, setup now routes it to a verified fallback leaf named `Other <parent name>` under that exact parent.
+- Example: `Games > Trading Card Games` becomes `Games > Trading Card Games > Other Trading Card Games`.
+- Existing explicit level-3 mappings always win and are never replaced by this fallback.
+- Missing fallback leaves are created only through the existing safe category reconciliation flow, then re-read and verified before the in-memory category map is changed.
