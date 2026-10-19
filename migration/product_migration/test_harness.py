@@ -1800,6 +1800,7 @@ def execute_controlled_product_write(
     api_domain: str,
     token: str,
     picture_path: Optional[str] = None,
+    repair_existing_product_ids: Optional[Iterable[str]] = None,
     timeout: int = 45,
 ) -> Dict[str, Any]:
     """
@@ -1844,6 +1845,12 @@ def execute_controlled_product_write(
     auth_token = _text(token)
     if not domain or not auth_token:
         raise ValueError("Lightspeed API domain/token are required.")
+
+    repairable_existing_ids = {
+        _text(x)
+        for x in (repair_existing_product_ids or [])
+        if _text(x)
+    }
 
     if domain.startswith("http://") or domain.startswith("https://"):
         base_host = domain.rstrip("/")
@@ -1958,38 +1965,42 @@ def execute_controlled_product_write(
             item for item in candidates
             if isinstance(item, dict) and _text(item.get("sku")) == sku
         ]
+        existing_for_repair = False
         if matches:
             existing = matches[0]
-            result["Status"] = "SKIPPED_EXISTING"
-            result["Product ID"] = _text(existing.get("id"))
+            product_id = _text(existing.get("id"))
+            result["Product ID"] = product_id
             # Legacy standard products have no explicit family resource. Store
             # the product ID here so existing result-sheet columns stay usable.
-            result["Family ID"] = _text(existing.get("id"))
-            return result
-
-        created = requests.post(
-            f"{base_host}/api/2.0/products",
-            json=legacy_payload,
-            headers={**headers, "Content-Type": "application/json"},
-            timeout=timeout,
-        )
-        if not created.ok:
-            raise RuntimeError(f"Create failed {created.status_code}: {created.text[:1000]}")
-
-        create_json = created.json()
-        create_data = create_json.get("data", create_json) if isinstance(create_json, dict) else create_json
-        if isinstance(create_data, list):
-            product_id = _text(create_data[0] if create_data else "")
-        elif isinstance(create_data, dict):
-            product_id = _text(create_data.get("id") or create_data.get("product_id"))
+            result["Family ID"] = product_id
+            if product_id not in repairable_existing_ids:
+                result["Status"] = "SKIPPED_EXISTING"
+                return result
+            existing_for_repair = True
         else:
-            product_id = _text(create_data)
+            created = requests.post(
+                f"{base_host}/api/2.0/products",
+                json=legacy_payload,
+                headers={**headers, "Content-Type": "application/json"},
+                timeout=timeout,
+            )
+            if not created.ok:
+                raise RuntimeError(f"Create failed {created.status_code}: {created.text[:1000]}")
 
-        if not product_id:
-            raise RuntimeError(f"Create succeeded but product ID was missing: {create_json}")
+            create_json = created.json()
+            create_data = create_json.get("data", create_json) if isinstance(create_json, dict) else create_json
+            if isinstance(create_data, list):
+                product_id = _text(create_data[0] if create_data else "")
+            elif isinstance(create_data, dict):
+                product_id = _text(create_data.get("id") or create_data.get("product_id"))
+            else:
+                product_id = _text(create_data)
 
-        result["Product ID"] = product_id
-        result["Family ID"] = product_id
+            if not product_id:
+                raise RuntimeError(f"Create succeeded but product ID was missing: {create_json}")
+
+            result["Product ID"] = product_id
+            result["Family ID"] = product_id
 
         # Legacy POST /api/2.0/products does not reliably persist the
         # inventory-tracking flag even when has_inventory is supplied. The
@@ -2006,7 +2017,7 @@ def execute_controlled_product_write(
             tracking_result.get("Inventory Tracking Enabled")
         )
 
-        if picture_path:
+        if picture_path and not existing_for_repair:
             if not os.path.isfile(picture_path):
                 raise FileNotFoundError(f"Picture not found: {picture_path}")
 
@@ -2127,7 +2138,7 @@ def execute_controlled_product_write(
             )
         result["Migration Flags"] = " | ".join(migration_flags)
 
-        result["Status"] = "CREATED"
+        result["Status"] = "REPAIRED_EXISTING" if existing_for_repair else "CREATED"
         verification_failures = [
             label for label, ok in [
                 ("name", result["Name Verified"]),
@@ -2168,6 +2179,7 @@ def execute_controlled_batch(
     api_domain: str,
     token: str,
     image_search_roots: Iterable[str] = (),
+    repair_existing_product_ids: Optional[Iterable[str]] = None,
     max_writes: Optional[int] = None,
 ) -> pd.DataFrame:
     """
@@ -2200,6 +2212,7 @@ def execute_controlled_batch(
             api_domain=api_domain,
             token=token,
             picture_path=picture_path,
+            repair_existing_product_ids=repair_existing_product_ids,
         )
         write_result["Run ID"] = _text(row.get("Run ID"))
         write_result["Picture Source"] = _text(picture_name)
