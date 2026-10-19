@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-19-v54`.
+As of 2026-10-16, the audited notebook version is `2026-10-19-v55`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -256,3 +256,11 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Product read-back now verifies `has_inventory` is enabled.
 - Reorder testing repairs older migration-test products that were created without inventory tracking by calling the legacy 2.1 product update with `common.track_inventory = true`, verifies `has_inventory`, then applies reorder settings.
 - `MAX_REORDER_TEST_WRITES = TEST_BATCH_SIZE`. Helper functions no longer contain fixed numeric write limits; notebook batch controls are derived from the configured test batch size.
+
+
+### v55 live category UUID reconciliation
+- Setup now audits every intended Lightspeed path from the Mapping sheet against the live 2026-07 product-category hierarchy before product analysis.
+- `Cat ID` is refreshed from live Lightspeed UUIDs after a successful audit/reconcile; it is a cache, not the authority.
+- A `Category UUID Audit` tab records MATCH, MISSING_FROM_CAT_ID, UUID_MISMATCH, ALTERNATE_PATH, DUPLICATE_LIVE_PATH, MISSING_PARENT, MISSING_ROOT, CREATED_VERIFIED, and CREATE_NOT_VERIFIED outcomes.
+- Safe creation is limited to a truly missing leaf beneath an already verified parent path. If the same leaf exists anywhere under another live hierarchy (including another Level 1), no category is created and the row is flagged ALTERNATE_PATH for review.
+- Existing categories are never moved, renamed, deleted, or re-parented by this reconciliation.
