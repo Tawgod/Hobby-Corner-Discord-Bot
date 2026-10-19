@@ -188,6 +188,233 @@ def build_supplier_uuid_map(supplier_id_df: pd.DataFrame) -> Dict[str, str]:
     return out
 
 
+def audit_and_reconcile_category_catalog(
+    cat_id_df: pd.DataFrame,
+    desired_paths: Iterable[str],
+    *,
+    api_domain: str,
+    token: str,
+    create_missing: bool = False,
+    timeout: int = 45,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Compare the cached Cat ID sheet to Lightspeed's live category hierarchy.
+
+    Safety rules:
+      - full path is authoritative, not leaf name alone
+      - if the desired leaf already exists under another hierarchy, do not
+        create a duplicate; report ALTERNATE_PATH for review
+      - create only a missing leaf whose expected parent path already exists
+      - never rename, move, delete, or re-parent an existing Lightspeed category
+      - after optional creates, re-read Lightspeed and return a fresh canonical
+        Cat ID dataframe plus an audit dataframe
+    """
+    import requests
+
+    domain = _text(api_domain)
+    auth_token = _text(token)
+    if not domain or not auth_token:
+        raise ValueError("Lightspeed API domain/token are required for category audit.")
+
+    base_host = domain.rstrip("/") if domain.startswith(("http://", "https://")) else f"https://{domain}.retail.lightspeed.app"
+    headers = {
+        "Authorization": f"Bearer {auth_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "HobbyCorner-ProductMigration/1.0",
+    }
+
+    def list_categories() -> List[Dict[str, Any]]:
+        res = requests.get(
+            f"{base_host}/api/2026-07/product_categories",
+            headers=headers,
+            params={"include": "family", "page_size": 1000},
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
+            )
+        body = res.json()
+        data = body.get("data", {}) if isinstance(body, dict) else {}
+        rows = data.get("categories", []) if isinstance(data, dict) else []
+        return [x for x in rows if isinstance(x, dict)]
+
+    def path_for(item: Dict[str, Any]) -> str:
+        category_path = item.get("category_path") or []
+        names = [
+            _text(part.get("name"))
+            for part in category_path
+            if isinstance(part, dict) and _text(part.get("name"))
+        ]
+        own = _text(item.get("name"))
+        if own and (not names or _norm(names[-1]) != _norm(own)):
+            names.append(own)
+        return " > ".join(names)
+
+    def index(rows: List[Dict[str, Any]]):
+        by_path: Dict[str, List[Dict[str, Any]]] = {}
+        by_leaf: Dict[str, List[Dict[str, Any]]] = {}
+        for item in rows:
+            path = path_for(item)
+            if not path:
+                continue
+            by_path.setdefault(_norm(path), []).append(item)
+            leaf = path.split(" > ")[-1].strip()
+            if leaf:
+                by_leaf.setdefault(_norm(leaf), []).append(item)
+        return by_path, by_leaf
+
+    desired = sorted({_text(p) for p in desired_paths if _text(p)}, key=lambda x: x.casefold())
+    live = list_categories()
+    by_path, by_leaf = index(live)
+
+    cached_rows: Dict[str, str] = {}
+    if cat_id_df is not None and not cat_id_df.empty:
+        for _, row in cat_id_df.iterrows():
+            levels = [_text(row.get(col)) for col in ("Level 1", "Level 2", "Level 3")]
+            levels = [x for x in levels if x]
+            if levels:
+                cached_rows[_norm(" > ".join(levels))] = _text(row.get("UUID"))
+
+    audit_rows: List[Dict[str, Any]] = []
+    create_queue: List[Tuple[str, str, str]] = []
+
+    for path in desired:
+        key = _norm(path)
+        parts = [p.strip() for p in path.split(">") if p.strip()]
+        leaf = parts[-1] if parts else ""
+        exact = by_path.get(key, [])
+        cached_uuid = cached_rows.get(key, "")
+
+        if len(exact) == 1:
+            live_uuid = _text(exact[0].get("id"))
+            status = "MATCH" if cached_uuid == live_uuid else ("MISSING_FROM_CAT_ID" if not cached_uuid else "UUID_MISMATCH")
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": status,
+                "Live UUID": live_uuid,
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": "",
+                "Action": "Use live UUID",
+            })
+            continue
+
+        if len(exact) > 1:
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": "DUPLICATE_LIVE_PATH",
+                "Live UUID": " | ".join(_text(x.get("id")) for x in exact),
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": "",
+                "Action": "Manual review; no create",
+            })
+            continue
+
+        alternates = []
+        for item in by_leaf.get(_norm(leaf), []):
+            alt_path = path_for(item)
+            if alt_path and _norm(alt_path) != key:
+                alternates.append(f"{alt_path} [{_text(item.get('id'))}]")
+        if alternates:
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": "ALTERNATE_PATH",
+                "Live UUID": "",
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": " | ".join(sorted(alternates)),
+                "Action": "Verify hierarchy; no create",
+            })
+            continue
+
+        parent_path = " > ".join(parts[:-1])
+        parent_matches = by_path.get(_norm(parent_path), []) if parent_path else []
+        if len(parts) < 2:
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": "MISSING_ROOT",
+                "Live UUID": "",
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": "",
+                "Action": "Manual review; root creation blocked",
+            })
+        elif len(parent_matches) != 1:
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": "MISSING_PARENT",
+                "Live UUID": "",
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": "",
+                "Action": "Manual review; parent path not uniquely verified",
+            })
+        else:
+            parent_id = _text(parent_matches[0].get("id"))
+            audit_rows.append({
+                "Desired Path": path,
+                "Status": "MISSING_CREATEABLE",
+                "Live UUID": "",
+                "Cached UUID": cached_uuid,
+                "Alternate Live Paths": "",
+                "Action": "Create missing leaf" if create_missing else "Would create missing leaf",
+            })
+            if create_missing:
+                create_queue.append((path, leaf, parent_id))
+
+    for path, leaf, parent_id in create_queue:
+        res = requests.post(
+            f"{base_host}/api/2026-07/product_categories/bulk",
+            headers=headers,
+            json={"categories": [{"name": leaf, "parent_category_id": parent_id}]},
+            timeout=timeout,
+        )
+        if not res.ok:
+            raise RuntimeError(
+                f"Category create failed for {path!r} {res.status_code}: {res.text[:1000]}"
+            )
+
+    if create_queue:
+        live = list_categories()
+        by_path, by_leaf = index(live)
+
+    # Canonical Cat ID cache: one row for every live path, built from live UUIDs.
+    canonical_rows = []
+    for item in live:
+        path = path_for(item)
+        uid = _text(item.get("id"))
+        if not path or not uid:
+            continue
+        parts = [p.strip() for p in path.split(">") if p.strip()]
+        canonical_rows.append({
+            "Level 1": parts[0] if len(parts) > 0 else "",
+            "Level 2": parts[1] if len(parts) > 1 else "",
+            "Level 3": parts[2] if len(parts) > 2 else "",
+            "UUID": uid,
+        })
+    canonical_df = (
+        pd.DataFrame(canonical_rows)
+        .drop_duplicates(subset=["Level 1", "Level 2", "Level 3", "UUID"])
+        .sort_values(["Level 1", "Level 2", "Level 3"], kind="stable")
+        .reset_index(drop=True)
+    )
+
+    # Re-evaluate created paths after read-back.
+    if create_queue:
+        created_keys = {_norm(x[0]) for x in create_queue}
+        for row in audit_rows:
+            if _norm(row["Desired Path"]) not in created_keys:
+                continue
+            matches = by_path.get(_norm(row["Desired Path"]), [])
+            if len(matches) == 1 and _text(matches[0].get("id")):
+                row["Status"] = "CREATED_VERIFIED"
+                row["Live UUID"] = _text(matches[0].get("id"))
+                row["Action"] = "Created and verified"
+            else:
+                row["Status"] = "CREATE_NOT_VERIFIED"
+                row["Action"] = "Manual review required"
+
+    return pd.DataFrame(audit_rows), canonical_df
+
+
 def resolve_category_uuids_from_api(
     category_uuid_map: Dict[str, str],
     category_paths: Iterable[str],
