@@ -264,3 +264,8 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - A `Category UUID Audit` tab records MATCH, MISSING_FROM_CAT_ID, UUID_MISMATCH, ALTERNATE_PATH, DUPLICATE_LIVE_PATH, MISSING_PARENT, MISSING_ROOT, CREATED_VERIFIED, and CREATE_NOT_VERIFIED outcomes.
 - Safe creation is limited to a truly missing leaf beneath an already verified parent path. If the same leaf exists anywhere under another live hierarchy (including another Level 1), no category is created and the row is flagged ALTERNATE_PATH for review.
 - Existing categories are never moved, renamed, deleted, or re-parented by this reconciliation.
+
+
+### v60 category mapping source hardening
+- The `Mapping` tab is now explicitly authoritative for RMS Department/Category -> Lightspeed category paths instead of relying on first-match sheet discovery.
+- Setup prints the selected category mapping tab, entry count, and a regression probe requiring `Trains + HO Scale -> Classic Hobby > Trains > HO Scale`.
