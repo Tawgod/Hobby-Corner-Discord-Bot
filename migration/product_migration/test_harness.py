@@ -998,8 +998,9 @@ def build_standard_family_payload(
     brand_uuid_map: Optional[Dict[str, str]] = None,
     default_weight_unit: Optional[str] = None,
 ) -> Dict[str, Any]:
-    # Use the richer legacy web title only when its identity is corroborated;
-    # otherwise fall back to the RMS Description.
+    # RMS Web Description is the authoritative expanded product title when
+    # present; otherwise fall back to RMS Item.Description. Identity conflicts
+    # are gated separately before this payload builder is reached.
     name, _, web_trusted = _trusted_name_parts(row)
     sku = _text(_first_existing(row, ["RMS_SKU", "ItemLookupCode", "SKU"]))
     category_path = _text(row.get("LS_Category_Path"))
@@ -1693,7 +1694,7 @@ def execute_controlled_batch(
     api_domain: str,
     token: str,
     image_search_roots: Iterable[str] = (),
-    max_writes: int = 20,
+    max_writes: int = 50,
 ) -> pd.DataFrame:
     """
     Execute the configured test batch and return one result row per item.
