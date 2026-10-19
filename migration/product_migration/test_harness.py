@@ -2012,7 +2012,7 @@ def apply_controlled_reorder_batch(
     api_domain: str,
     token: str,
     outlet_id: str,
-    max_writes: int = 20,
+    max_writes: int = 50,
 ) -> pd.DataFrame:
     """
     Apply proposed reorder/restock values to an existing controlled test batch.
