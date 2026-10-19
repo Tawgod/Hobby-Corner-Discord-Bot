@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-16-v52`.
+As of 2026-10-16, the audited notebook version is `2026-10-19-v53`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -243,3 +243,9 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 ### HQ PAM export regression guard
 - Notebook v52 hard-stops if the RMS CSV still contains the known bad `GW48-111` -> `Tenfold Dungeon` WebDescription produced by the old `PAM.ItemID = Item.ID` join.
 - A freshly regenerated CSV from the corrected bridge should show a blank WebDescription for `GW48-111`, causing migration to use RMS Item.Description (`Space Marine Dice`) as the product name.
+
+
+### v53 controlled-test and reorder fixes
+- Default controlled product test batch is now 50, with `MAX_TEST_WRITES = TEST_BATCH_SIZE`; helper defaults are also 50 so there is no hidden 20-item fallback.
+- Setup prints requested size, eligible READY/mapped count, eligible count after prior-success exclusions, and the number of prior successful SKUs excluded. If fewer than requested are selected, the notebook explains that eligibility/exclusion count rather than implying a hard cap.
+- Reorder testing now allows a newly created zero-stock product to have no pre-existing outlet inventory record. Missing pre-write inventory is treated as zero on hand, the 2026-04 reorder-point upsert is applied, and the resulting inventory record is required to read back with unchanged quantity and the requested MIN_MAX values.
