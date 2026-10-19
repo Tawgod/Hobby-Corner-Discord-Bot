@@ -506,6 +506,19 @@ def analyze_candidates(
                 dict.fromkeys([*existing_flags, "web_description_untrusted"])
             )
 
+        sku_text = "" if pd.isna(row.get("RMS_SKU")) else str(row.get("RMS_SKU")).strip()
+        if sku_text and not re.fullmatch(r"[a-zA-Z0-9_/()#|.\-]+", sku_text):
+            existing_flags = [
+                x for x in str(result.get("Migration_Review_Flags", "")).split(",")
+                if x
+            ]
+            result["Migration_Review_Flags"] = ",".join(
+                dict.fromkeys([*existing_flags, "invalid_lightspeed_sku"])
+            )
+            mapping_reasons.append(
+                "SKU contains characters Lightspeed does not accept"
+            )
+
         identity_flags = source_identity_review_flags(row)
         if identity_flags:
             existing_flags = [
