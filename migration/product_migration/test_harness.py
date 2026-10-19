@@ -242,19 +242,18 @@ def audit_and_reconcile_category_catalog(
             if not isinstance(value, dict):
                 return []
 
+            # Lightspeed may wrap collection payloads more than once, e.g.
+            # {"data": {"data": [...], "page_info": {...}}}.
+            if "data" in value:
+                rows = category_rows_from(value.get("data"))
+                if rows:
+                    return rows
+
             for key in ("categories", "items", "product_categories"):
                 nested = value.get(key)
-                if isinstance(nested, list):
-                    rows = [x for x in nested if isinstance(x, dict)]
-                    if rows:
-                        return rows
-                if isinstance(nested, dict):
-                    rows = [
-                        x for x in nested.values()
-                        if isinstance(x, dict)
-                    ]
-                    if rows:
-                        return rows
+                rows = category_rows_from(nested)
+                if rows:
+                    return rows
 
             # Some collection responses may expose category records keyed by ID.
             values = [x for x in value.values() if isinstance(x, dict)]
@@ -523,19 +522,18 @@ def resolve_category_uuids_from_api(
             if not isinstance(value, dict):
                 return []
 
+            # Lightspeed may wrap collection payloads more than once, e.g.
+            # {"data": {"data": [...], "page_info": {...}}}.
+            if "data" in value:
+                rows = category_rows_from(value.get("data"))
+                if rows:
+                    return rows
+
             for key in ("categories", "items", "product_categories"):
                 nested = value.get(key)
-                if isinstance(nested, list):
-                    rows = [x for x in nested if isinstance(x, dict)]
-                    if rows:
-                        return rows
-                if isinstance(nested, dict):
-                    rows = [
-                        x for x in nested.values()
-                        if isinstance(x, dict)
-                    ]
-                    if rows:
-                        return rows
+                rows = category_rows_from(nested)
+                if rows:
+                    return rows
 
             # Some collection responses may expose category records keyed by ID.
             values = [x for x in value.values() if isinstance(x, dict)]
