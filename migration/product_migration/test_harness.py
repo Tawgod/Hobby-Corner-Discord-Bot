@@ -236,39 +236,62 @@ def audit_and_reconcile_category_catalog(
                 f"Lightspeed category audit failed {res.status_code}: {res.text[:1000]}"
             )
         body = res.json()
-        if isinstance(body, list):
-            rows = body
-        elif isinstance(body, dict):
-            data = body.get("data", body)
-            if isinstance(data, list):
-                rows = data
-            elif isinstance(data, dict):
-                rows = (
-                    data.get("categories")
-                    or data.get("items")
-                    or data.get("product_categories")
-                    or []
-                )
-            else:
-                rows = []
-        else:
-            rows = []
+        def category_rows_from(value: Any) -> List[Dict[str, Any]]:
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+            if not isinstance(value, dict):
+                return []
 
-        rows = [x for x in rows if isinstance(x, dict)]
+            for key in ("categories", "items", "product_categories"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    rows = [x for x in nested if isinstance(x, dict)]
+                    if rows:
+                        return rows
+                if isinstance(nested, dict):
+                    rows = [
+                        x for x in nested.values()
+                        if isinstance(x, dict)
+                    ]
+                    if rows:
+                        return rows
+
+            # Some collection responses may expose category records keyed by ID.
+            values = [x for x in value.values() if isinstance(x, dict)]
+            category_like = [
+                x for x in values
+                if _text(x.get("id")) and _text(x.get("name"))
+            ]
+            if category_like:
+                return category_like
+            return []
+
+        if isinstance(body, dict) and "data" in body:
+            rows = category_rows_from(body.get("data"))
+        else:
+            rows = category_rows_from(body)
+
         if not rows:
+            top_keys = sorted(body.keys()) if isinstance(body, dict) else []
+            data_obj = body.get("data") if isinstance(body, dict) else None
+            data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
             raise RuntimeError(
                 "Lightspeed category audit returned zero parseable categories. "
-                f"Response shape/type: {type(body).__name__}; refusing to replace Cat ID."
+                f"Response type={type(body).__name__}; top-level keys={top_keys}; "
+                f"data keys={data_keys}; refusing to modify Cat ID."
             )
         return rows
 
     def path_for(item: Dict[str, Any]) -> str:
         category_path = item.get("category_path") or []
-        names = [
-            _text(part.get("name"))
-            for part in category_path
-            if isinstance(part, dict) and _text(part.get("name"))
-        ]
+        names = []
+        for part in category_path:
+            if isinstance(part, dict):
+                name = _text(part.get("name"))
+            else:
+                name = _text(part)
+            if name:
+                names.append(name)
         own = _text(item.get("name"))
         if own and (not names or _norm(names[-1]) != _norm(own)):
             names.append(own)
@@ -494,39 +517,62 @@ def resolve_category_uuids_from_api(
                 f"Lightspeed category lookup failed {res.status_code}: {res.text[:1000]}"
             )
         body = res.json()
-        if isinstance(body, list):
-            rows = body
-        elif isinstance(body, dict):
-            data = body.get("data", body)
-            if isinstance(data, list):
-                rows = data
-            elif isinstance(data, dict):
-                rows = (
-                    data.get("categories")
-                    or data.get("items")
-                    or data.get("product_categories")
-                    or []
-                )
-            else:
-                rows = []
-        else:
-            rows = []
+        def category_rows_from(value: Any) -> List[Dict[str, Any]]:
+            if isinstance(value, list):
+                return [x for x in value if isinstance(x, dict)]
+            if not isinstance(value, dict):
+                return []
 
-        rows = [x for x in rows if isinstance(x, dict)]
+            for key in ("categories", "items", "product_categories"):
+                nested = value.get(key)
+                if isinstance(nested, list):
+                    rows = [x for x in nested if isinstance(x, dict)]
+                    if rows:
+                        return rows
+                if isinstance(nested, dict):
+                    rows = [
+                        x for x in nested.values()
+                        if isinstance(x, dict)
+                    ]
+                    if rows:
+                        return rows
+
+            # Some collection responses may expose category records keyed by ID.
+            values = [x for x in value.values() if isinstance(x, dict)]
+            category_like = [
+                x for x in values
+                if _text(x.get("id")) and _text(x.get("name"))
+            ]
+            if category_like:
+                return category_like
+            return []
+
+        if isinstance(body, dict) and "data" in body:
+            rows = category_rows_from(body.get("data"))
+        else:
+            rows = category_rows_from(body)
+
         if not rows:
+            top_keys = sorted(body.keys()) if isinstance(body, dict) else []
+            data_obj = body.get("data") if isinstance(body, dict) else None
+            data_keys = sorted(data_obj.keys()) if isinstance(data_obj, dict) else []
             raise RuntimeError(
                 "Lightspeed category audit returned zero parseable categories. "
-                f"Response shape/type: {type(body).__name__}; refusing to replace Cat ID."
+                f"Response type={type(body).__name__}; top-level keys={top_keys}; "
+                f"data keys={data_keys}; refusing to modify Cat ID."
             )
         return rows
 
     def path_for(item: Dict[str, Any]) -> str:
         category_path = item.get("category_path") or []
-        names = [
-            _text(part.get("name"))
-            for part in category_path
-            if isinstance(part, dict) and _text(part.get("name"))
-        ]
+        names = []
+        for part in category_path:
+            if isinstance(part, dict):
+                name = _text(part.get("name"))
+            else:
+                name = _text(part)
+            if name:
+                names.append(name)
         own_name = _text(item.get("name"))
         if own_name and (not names or _norm(names[-1]) != _norm(own_name)):
             names.append(own_name)
