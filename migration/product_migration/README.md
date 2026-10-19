@@ -187,7 +187,7 @@ No production Railway deployment is required for the Colab migration notebook.
 
 ## Current notebook configuration
 
-As of 2026-10-16, the audited notebook version is `2026-10-19-v53`.
+As of 2026-10-16, the audited notebook version is `2026-10-19-v54`.
 
 - Authoritative RMS source: `My Drive/Hobby Corner Migration/HCDB Test Items.csv`.
 - Legacy RMS candidate Google Sheet is emergency-only and `ALLOW_LEGACY_SOURCE_FALLBACK` defaults to `False`; setup fails closed when the Drive CSV is missing.
@@ -249,3 +249,10 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - Default controlled product test batch is now 50, with `MAX_TEST_WRITES = TEST_BATCH_SIZE`; helper defaults are also 50 so there is no hidden 20-item fallback.
 - Setup prints requested size, eligible READY/mapped count, eligible count after prior-success exclusions, and the number of prior successful SKUs excluded. If fewer than requested are selected, the notebook explains that eligibility/exclusion count rather than implying a hard cap.
 - Reorder testing now allows a newly created zero-stock product to have no pre-existing outlet inventory record. Missing pre-write inventory is treated as zero on hand, the 2026-04 reorder-point upsert is applied, and the resulting inventory record is required to read back with unchanged quantity and the requested MIN_MAX values.
+
+
+### v54 inventory-tracking and batch-size fixes
+- New legacy product creates now send `has_inventory: true`, preserving the internal `track_inventory: true` setting so Lightspeed's Track inventory checkbox is enabled.
+- Product read-back now verifies `has_inventory` is enabled.
+- Reorder testing repairs older migration-test products that were created without inventory tracking by calling the legacy 2.1 product update with `common.track_inventory = true`, verifies `has_inventory`, then applies reorder settings.
+- `MAX_REORDER_TEST_WRITES = TEST_BATCH_SIZE`. Helper functions no longer contain fixed numeric write limits; notebook batch controls are derived from the configured test batch size.
