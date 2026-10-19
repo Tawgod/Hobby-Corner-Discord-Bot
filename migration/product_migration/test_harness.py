@@ -202,9 +202,8 @@ def audit_and_reconcile_category_catalog(
 
     Safety rules:
       - full path is authoritative, not leaf name alone
-      - if the desired leaf already exists under another hierarchy, do not
-        create a duplicate; report ALTERNATE_PATH for review
-      - create only a missing leaf whose expected parent path already exists
+      - the same leaf name may legitimately exist under different parents
+      - create only a missing full path whose expected parent path already exists
       - never rename, move, delete, or re-parent an existing Lightspeed category
       - after optional creates, re-read Lightspeed and return a fresh canonical
         Cat ID dataframe plus an audit dataframe
@@ -360,16 +359,6 @@ def audit_and_reconcile_category_catalog(
             alt_path = path_for(item)
             if alt_path and _norm(alt_path) != key:
                 alternates.append(f"{alt_path} [{_text(item.get('id'))}]")
-        if alternates:
-            audit_rows.append({
-                "Desired Path": path,
-                "Status": "ALTERNATE_PATH",
-                "Live UUID": "",
-                "Cached UUID": cached_uuid,
-                "Alternate Live Paths": " | ".join(sorted(alternates)),
-                "Action": "Verify hierarchy; no create",
-            })
-            continue
 
         parent_path = " > ".join(parts[:-1])
         parent_matches = by_path.get(_norm(parent_path), []) if parent_path else []
@@ -388,7 +377,7 @@ def audit_and_reconcile_category_catalog(
                 "Status": "MISSING_PARENT",
                 "Live UUID": "",
                 "Cached UUID": cached_uuid,
-                "Alternate Live Paths": "",
+                "Alternate Live Paths": " | ".join(sorted(alternates)),
                 "Action": "Manual review; parent path not uniquely verified",
             })
         else:
@@ -398,8 +387,8 @@ def audit_and_reconcile_category_catalog(
                 "Status": "MISSING_CREATEABLE",
                 "Live UUID": "",
                 "Cached UUID": cached_uuid,
-                "Alternate Live Paths": "",
-                "Action": "Create missing leaf" if create_missing else "Would create missing leaf",
+                "Alternate Live Paths": " | ".join(sorted(alternates)),
+                "Action": "Create missing full path" if create_missing else "Would create missing full path",
             })
             if create_missing:
                 create_queue.append((path, leaf, parent_id))
