@@ -44,6 +44,16 @@ MASTER_CUSTOMER_TAB = os.environ.get("MASTER_CUSTOMER_TAB", "Customer").strip() 
 SPECIAL_ORDERS_API_URL = os.environ.get("SPECIAL_ORDERS_API_URL", "").rstrip("/")
 SPECIAL_ORDERS_ADMIN_KEY = os.environ.get("SPECIAL_ORDERS_ADMIN_KEY", "")
 GW_PREORDER_TEST_CHANNEL_ID = os.environ.get("GW_PREORDER_TEST_CHANNEL_ID", "1336092698935033917").strip()
+PREORDER_WATCH_CHANNEL_NAMES = {
+    x.strip().lower()
+    for x in os.environ.get("PREORDER_WATCH_CHANNEL_NAMES", "gw-preorders-chat").split(",")
+    if x.strip()
+}
+PREORDER_WATCH_CHANNEL_IDS = {
+    x.strip()
+    for x in os.environ.get("PREORDER_WATCH_CHANNEL_IDS", "").split(",")
+    if x.strip()
+}
 
 channel_map_env = os.environ.get("CHANNEL_SHEET_MAP")
 if channel_map_env:
@@ -1567,6 +1577,94 @@ def record_gw_reaction(payload, user, action):
         print(f"❌ GW reaction capture failed: {e}")
         return True
 
+
+def preorder_watch_enabled_for_channel(channel):
+    channel_id = str(getattr(channel, "id", "") or "")
+    channel_name = str(getattr(channel, "name", "") or "").strip().lower()
+    return (
+        (channel_id and channel_id in PREORDER_WATCH_CHANNEL_IDS) or
+        (channel_name and channel_name in PREORDER_WATCH_CHANNEL_NAMES)
+    )
+
+def extract_preorder_watch_item(text):
+    message = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not message:
+        return None
+
+    intent_patterns = [
+        r"\b(?:could|can|may|would)\s+i\b.{0,80}\b(?:pre[- ]?order|order)\b",
+        r"\bi(?:'d| would)?\s+like\s+to\s+(?:pre[- ]?order|order)\b",
+        r"\bplease\s+(?:put\s+me\s+down|pre[- ]?order|order)\b",
+        r"\bkeep\s+(?:an?\s+)?eye\s+out\s+for\b",
+        r"\blet\s+me\s+know\s+when\b.{0,120}\b(?:available|pre[- ]?order|orderable|released)\b",
+        r"\bwhen\b.{0,100}\bavailable\b.{0,100}\b(?:pre[- ]?order|order)\b",
+    ]
+    if not any(re.search(pattern, message, re.IGNORECASE) for pattern in intent_patterns):
+        return None
+
+    extract_patterns = [
+        r"(?:could|can|may|would)\s+i\s+(?:please\s+)?(?:pre[- ]?order|order)\s+(?:the\s+)?(.+?)(?:\?|!|\.|,\s*thanks|\s+thanks\b|$)",
+        r"i(?:'d| would)?\s+like\s+to\s+(?:pre[- ]?order|order)\s+(?:the\s+)?(.+?)(?:\?|!|\.|,\s*thanks|\s+thanks\b|$)",
+        r"please\s+(?:put\s+me\s+down\s+for|pre[- ]?order|order)\s+(?:the\s+)?(.+?)(?:\?|!|\.|$)",
+        r"keep\s+(?:an?\s+)?eye\s+out\s+for\s+(?:the\s+)?(.+?)(?:\?|!|\.|$)",
+    ]
+    item = None
+    for pattern in extract_patterns:
+        match = re.search(pattern, message, re.IGNORECASE)
+        if match:
+            item = match.group(1).strip(" \t\r\n,.;:-")
+            break
+
+    if not item:
+        # Preserve the original wording rather than inventing an item name.
+        item = message[:500]
+
+    future_markers = [
+        "not up for preorder", "not available", "when it's available", "when its available",
+        "when available", "when it comes out", "once available", "once it's available",
+        "once its available", "keep an eye", "let me know when", "not out yet"
+    ]
+    lowered = message.lower()
+    future = any(marker in lowered for marker in future_markers)
+    confidence = 0.96 if future and len(item) < len(message) else (0.90 if len(item) < len(message) else 0.78)
+
+    return {
+        "item_text": item[:500],
+        "confidence": confidence
+    }
+
+def post_preorder_watch(payload):
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        raise RuntimeError("Special Orders API is not configured for preorder watch capture.")
+
+    response = requests.post(
+        f"{SPECIAL_ORDERS_API_URL}/preorders/discord-watch",
+        headers={**special_orders_headers(), "Content-Type": "application/json"},
+        json=payload,
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        raise RuntimeError(data.get("error", response.text))
+    return data
+
+def discord_message_watch_payload(message, parsed):
+    return {
+        "capture_mode": "INFORMAL",
+        "item_text": parsed["item_text"],
+        "message_text": message.content,
+        "discord_user_id": str(message.author.id),
+        "discord_username": str(message.author.name),
+        "discord_display_name": str(getattr(message.author, "display_name", "") or message.author.name),
+        "guild_id": str(message.guild.id) if message.guild else None,
+        "channel_id": str(message.channel.id),
+        "channel_name": str(getattr(message.channel, "name", "") or ""),
+        "message_id": str(message.id),
+        "message_url": message.jump_url,
+        "source_key": f"discord-message:{message.guild.id if message.guild else 'dm'}:{message.channel.id}:{message.id}",
+        "confidence": parsed.get("confidence")
+    }
+
 def build_gw_preorder_embed(item):
     embed = discord.Embed(
         title=str(item.get("title") or "GW Preorder")[:256],
@@ -1718,6 +1816,53 @@ async def hc_gw_test_publish(interaction: discord.Interaction, campaign_id: int)
         await publish_gw_test_campaign(interaction, campaign_id)
     except Exception as e:
         await interaction.followup.send(f"GW test publish failed: {e}", ephemeral=True)
+
+
+
+@hc_group.command(name="preorder_watch", description="Add an item to Hobby Corner's preorder watch list")
+@app_commands.describe(item="Product or release you want Hobby Corner to watch for")
+async def hc_preorder_watch(interaction: discord.Interaction, item: str):
+    item_text = str(item or "").strip()
+    if not item_text:
+        await interaction.response.send_message("Please include an item to watch.", ephemeral=True)
+        return
+
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        await interaction.response.send_message("Preorder watch capture is not configured yet.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        channel = interaction.channel
+        guild = interaction.guild
+        payload = {
+            "capture_mode": "FORMAL",
+            "item_text": item_text[:500],
+            "message_text": f"/hc preorder_watch {item_text}"[:2000],
+            "discord_user_id": str(interaction.user.id),
+            "discord_username": str(interaction.user.name),
+            "discord_display_name": str(getattr(interaction.user, "display_name", "") or interaction.user.name),
+            "guild_id": str(guild.id) if guild else None,
+            "channel_id": str(channel.id) if channel else None,
+            "channel_name": str(getattr(channel, "name", "") or "") if channel else None,
+            "message_id": None,
+            "message_url": (
+                f"https://discord.com/channels/{guild.id}/{channel.id}"
+                if guild and channel else None
+            ),
+            "source_key": f"discord-command:{interaction.id}",
+            "confidence": 1.0
+        }
+        data = post_preorder_watch(payload)
+        watch = data.get("watch", {})
+        match_text = " Customer matched." if data.get("matched_customer") else " Customer match will need review."
+        await interaction.followup.send(
+            f"👀 Added **{item_text[:180]}** to the preorder watch list (#{watch.get('id', '?')})."
+            + match_text,
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(f"Could not add preorder watch item: {e}", ephemeral=True)
 
 
 @hc_group.command(name="timeclock", description="Open the Hobby Corner timeclock control panel")
@@ -2136,6 +2281,19 @@ async def on_raw_reaction_remove(payload):
 async def on_message(message):
     if message.author.bot: 
         return
+
+    if message.guild and preorder_watch_enabled_for_channel(message.channel):
+        parsed_watch = extract_preorder_watch_item(message.content)
+        if parsed_watch:
+            try:
+                data = post_preorder_watch(discord_message_watch_payload(message, parsed_watch))
+                watch = data.get("watch", {})
+                print(
+                    f"👀 Captured informal preorder watch #{watch.get('id', '?')} "
+                    f"from {message.author} in #{getattr(message.channel, 'name', message.channel.id)}"
+                )
+            except Exception as e:
+                print(f"❌ Informal preorder watch capture failed for message {message.id}: {e}")
 
     if message.content.startswith("!timeclock"):
         if not message.guild or not has_timeclock_staff_access(message.author):
