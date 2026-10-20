@@ -478,11 +478,32 @@ def analyze_candidates(
         # Corner intentionally uses the Lightspeed supplier "Other" whenever
         # the RMS primary supplier is blank or has no explicit mapping.
         primary_supplier_key = norm(row.get("RMS_Supplier"))
-        supplier = supplier_map.get(primary_supplier_key, "")
-        supplier_fallback = not bool(supplier)
-        if supplier_fallback:
-            supplier = "Other"
+        brand_key = norm(row.get("Brand"))
+        on_hand_qty = numeric(row.get("RMS_Quantity"))
+        supplier_special_route = ""
+
+        # Horizon Hobby Rockets is a retired/legacy supplier bucket. In-stock
+        # Estes-branded rocket items should use the live ESTES supplier; all
+        # other Horizon Hobby Rockets rows intentionally fall back to Other.
+        if primary_supplier_key == norm("Horizon Hobby Rockets"):
+            if on_hand_qty > 0 and (
+                brand_key == norm("Estes")
+                or brand_key.startswith(norm("Estes") + " ")
+            ):
+                supplier = "ESTES"
+                supplier_special_route = "horizon_rockets_in_stock_estes"
+            else:
+                supplier = "Other"
+                supplier_special_route = "horizon_rockets_other"
+            supplier_fallback = True
+        else:
+            supplier = supplier_map.get(primary_supplier_key, "")
+            supplier_fallback = not bool(supplier)
+            if supplier_fallback:
+                supplier = "Other"
+
         result["Supplier_Fallback_Applied"] = supplier_fallback
+        result["Supplier_Special_Route"] = supplier_special_route
         result["LS_Supplier"] = supplier
         result["Supplier_Mapped"] = bool(supplier)
 
