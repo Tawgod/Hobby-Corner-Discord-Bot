@@ -306,3 +306,18 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - The Mapping/RMS-D&C reference was extended for safe aliases and blank-category fallbacks without breaking the Mapping spill formula.
 - After the cleanup, only five Department/Category combinations (15 candidate products) remain intentionally unresolved because one shared destination would be ambiguous.
 - Status: implemented; runtime verification pending v66 setup and a controlled test batch.
+
+
+### v67 supplier/category disposition cleanup
+- Legacy `Horizon Hobby Rockets` now routes conditionally: in-stock Estes-branded items use live supplier `ESTES`; all other rows use `Other`.
+- The stale cached `Horizon Hobby Rockets` supplier UUID was removed from Supplier ID Map; an explicit migration mapping documents the conditional rule.
+- Added a setup regression probe that fails closed if Horizon Hobby Rockets routing deviates from the rule.
+- The five previously ambiguous low-volume category combinations now have explicit fallback destinations:
+  - Tools & Paints / blank -> General > Other
+  - Other / blank -> General > Other
+  - Media / blank -> General > Other
+  - Media / Construction -> General > Other
+  - Toystore / Telescopes & Accessories -> Toys > Other Toys
+- `General > Other` is intentionally created/verified by the existing safe category reconciliation flow if missing.
+- Future unmapped category pairs remain review-visible; these explicit fallbacks do not suppress newly emerging high-volume mapping gaps.
+- Status: implemented; runtime verification pending v67 setup/test.
