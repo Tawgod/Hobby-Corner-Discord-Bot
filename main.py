@@ -1894,7 +1894,68 @@ async def hc_timeclock(interaction: discord.Interaction):
         ephemeral=True
     )
 
+
+async def add_message_to_preorder_watch(interaction: discord.Interaction, message: discord.Message):
+    if interaction.guild is None or not has_timeclock_staff_access(interaction.user):
+        await interaction.response.send_message(
+            "You do not have access to the staff preorder-watch action.",
+            ephemeral=True
+        )
+        return
+
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        await interaction.response.send_message(
+            "Preorder watch capture is not configured yet.",
+            ephemeral=True
+        )
+        return
+
+    await interaction.response.defer(ephemeral=True)
+    try:
+        parsed = extract_preorder_watch_item(message.content)
+        item_text = (
+            parsed.get("item_text")
+            if parsed
+            else re.sub(r"\s+", " ", str(message.content or "")).strip()[:500]
+        )
+        if not item_text:
+            item_text = "Discord message — review original message"
+
+        payload = {
+            "capture_mode": "STAFF",
+            "item_text": item_text,
+            "message_text": message.content,
+            "discord_user_id": str(message.author.id),
+            "discord_username": str(message.author.name),
+            "discord_display_name": str(getattr(message.author, "display_name", "") or message.author.name),
+            "guild_id": str(message.guild.id) if message.guild else None,
+            "channel_id": str(message.channel.id),
+            "channel_name": str(getattr(message.channel, "name", "") or ""),
+            "message_id": str(message.id),
+            "message_url": message.jump_url,
+            "source_key": f"discord-message:{message.guild.id if message.guild else 'dm'}:{message.channel.id}:{message.id}",
+            "confidence": 1.0,
+            "notes": f"Captured manually by staff member {interaction.user}"
+        }
+        data = post_preorder_watch(payload)
+        watch = data.get("watch", {})
+        await interaction.followup.send(
+            f"👀 Added message to preorder watch #{watch.get('id', '?')}: **{item_text[:160]}**",
+            ephemeral=True
+        )
+    except Exception as e:
+        await interaction.followup.send(
+            f"Could not add this message to preorder watch: {e}",
+            ephemeral=True
+        )
+
+preorder_watch_message_menu = app_commands.ContextMenu(
+    name="Add to Preorder Watch",
+    callback=add_message_to_preorder_watch
+)
+
 bot.tree.add_command(hc_group)
+bot.tree.add_command(preorder_watch_message_menu)
 
 
 # --- GLOBAL MEMORY CACHES & QUEUES ---
