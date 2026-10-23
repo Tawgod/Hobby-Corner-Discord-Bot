@@ -16,6 +16,7 @@ class DashboardProvider(Protocol):
     async def available(self, user_id: int) -> list: ...
     async def claim(self, task_id: str, user_id: int) -> str: ...
     async def complete(self, task_id: str, user_id: int) -> str: ...
+    async def create(self, title: str, details: str, user_id: int) -> str: ...
     async def is_staff(self, guild_id: int, user_id: int) -> bool: ...
 
 def dashboard_embed(data: dict) -> discord.Embed:
@@ -38,6 +39,45 @@ def task_lines(tasks: list) -> str:
         task_id = str(item.get("id", ""))[:64]
         lines.append(f"• **{title}** — \`{task_id}\`")
     return "\n".join(lines)
+
+class TaskInputModal(discord.ui.Modal):
+    title_text = discord.ui.TextInput(label="Task title", max_length=100)
+    details = discord.ui.TextInput(label="Details", style=discord.TextStyle.paragraph, required=False, max_length=1000)
+
+    def __init__(self, provider: DashboardProvider):
+        super().__init__(title="Create Staff Task")
+        self.provider = provider
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild or not await self.provider.is_staff(interaction.guild.id, interaction.user.id):
+            await interaction.response.send_message("Staff access required.", ephemeral=True)
+            return
+        result = await self.provider.create(str(self.title_text), str(self.details), interaction.user.id)
+        await interaction.response.send_message(result, ephemeral=True)
+
+
+class TaskIdModal(discord.ui.Modal):
+    task_id = discord.ui.TextInput(label="Task ID", min_length=1, max_length=64)
+
+    def __init__(self, provider: DashboardProvider, action: str):
+        super().__init__(title="Claim Task" if action == "claim" else "Complete Task")
+        self.provider = provider
+        self.action = action
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not interaction.guild or not await self.provider.is_staff(interaction.guild.id, interaction.user.id):
+            await interaction.response.send_message("Staff access required.", ephemeral=True)
+            return
+        try:
+            if self.action == "claim":
+                result = await self.provider.claim(str(self.task_id), interaction.user.id)
+            else:
+                result = await self.provider.complete(str(self.task_id), interaction.user.id)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        await interaction.response.send_message(result, ephemeral=True)
+
 
 class TaskDashboardView(discord.ui.View):
     def __init__(self, provider: DashboardProvider):
@@ -64,6 +104,24 @@ class TaskDashboardView(discord.ui.View):
         tasks = await self.provider.available(interaction.user.id)
         await interaction.response.send_message(task_lines(tasks) +
             "\nUse the task's claim action to accept an available task.", ephemeral=True)
+
+    @discord.ui.button(label="New Task", emoji="➕", style=discord.ButtonStyle.success,
+                       custom_id="hc:task_dashboard:create:v1")
+    async def create_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.authorized(interaction): return
+        await interaction.response.send_modal(TaskInputModal(self.provider))
+
+    @discord.ui.button(label="Claim Task", emoji="🙋", style=discord.ButtonStyle.secondary,
+                       custom_id="hc:task_dashboard:claim:v1")
+    async def claim_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.authorized(interaction): return
+        await interaction.response.send_modal(TaskIdModal(self.provider, "claim"))
+
+    @discord.ui.button(label="Complete Task", emoji="✅", row=1, style=discord.ButtonStyle.success,
+                       custom_id="hc:task_dashboard:complete:v1")
+    async def complete_task(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.authorized(interaction): return
+        await interaction.response.send_modal(TaskIdModal(self.provider, "complete"))
 
     @discord.ui.button(label="Refresh", emoji="🔄", style=discord.ButtonStyle.secondary,
                        custom_id="hc:task_dashboard:refresh:v1")
