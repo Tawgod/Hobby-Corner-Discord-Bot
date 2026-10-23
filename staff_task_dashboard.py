@@ -5,6 +5,8 @@ Requires a trusted task backend implementing DashboardProvider, and explicit
 staff-role authorization. No in-memory task state is authoritative.
 """
 import discord
+import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Protocol
 
@@ -153,3 +155,25 @@ async def ensure_dashboard(bot: discord.Client, provider: DashboardProvider, *,
 def register_dashboard(bot: discord.Client, provider: DashboardProvider) -> None:
     """Call exactly once at startup so buttons survive bot restart."""
     bot.add_view(TaskDashboardView(provider))
+
+async def dashboard_refresh_loop(bot: discord.Client, provider: DashboardProvider, *,
+                                 thread_id: int, message_id: int, interval_seconds: int = 300):
+    """Run as one managed startup task after ready; cancel on bot shutdown.
+
+    Edit only when counters change, rather than artificially bumping the timestamp
+    on every poll. Store thread and message IDs in durable configuration.
+    """
+    if interval_seconds < 60:
+        raise ValueError("Minimum refresh interval is 60 seconds")
+    previous = None
+    while not bot.is_closed():
+        try:
+            data = await provider.summary()
+            counts = data.get("counts", {})
+            snapshot = tuple(sorted((str(k), int(v)) for k, v in counts.items()))
+            if snapshot != previous:
+                await ensure_dashboard(bot, provider, thread_id=thread_id, message_id=message_id)
+                previous = snapshot
+        except (discord.HTTPException, ValueError, OSError):
+            logging.exception("Staff dashboard refresh failed")
+        await asyncio.sleep(interval_seconds)
