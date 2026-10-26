@@ -432,6 +432,14 @@ class RmsJobCreate(BaseModel):
     job_type: str
     table_name: str|None=None
     preview_rows: int|None=25
+    query_name: str|None=None
+    data_source: str|None="store"
+    item_lookup_code: str|None=None
+    customer_id: str|None=None
+    supplier_id: str|None=None
+    start_date: str|None=None
+    end_date: str|None=None
+    limit: int|None=250
 
 class RmsJobComplete(BaseModel):
     status: str
@@ -537,15 +545,36 @@ pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8
 <button class="secondary" onclick="queueJob('database-tables')">List All Tables / Views</button>
 <button class="secondary" onclick="queueJob('database-schema')">Full Database Schema</button>
 <button class="secondary" onclick="queueJob('database-relations')">Relationship Scan</button>
+<button class="secondary" onclick="queueJob('operational-discovery')">Operational / History Discovery</button>
+<button class="secondary" onclick="queueJob('read-catalog')">Read Query Catalog</button>
+<button class="secondary" onclick="queueJob('safety-test')">Read-only Safety Test</button>
+<button class="secondary" onclick="queueSourceJob('source-tables','store')">List HCDB Tables</button>
+<button class="secondary" onclick="queueSourceJob('source-tables','hq')">List HQ Tables</button>
 <p class="small">The RMS server checks for queued work periodically. No inbound connection to SQL Server is opened.</p>
 </div>
 <div class="card">
 <h2>Read-only database explorer</h2>
-<p class="small">Enter an exact table/view name returned by “List All Tables / Views”. The bridge validates it against RMS metadata. Arbitrary SQL is not accepted.</p>
-<input id="tableName" placeholder="Table or view name">
+<p class="small">Enter an exact table/view name. HCDB is the general historical source; HQ is intended mainly for web/item data. Arbitrary SQL is not accepted.</p>
+<select id="dataSource"><option value="store">HCDB / store</option><option value="hq">HQ</option></select>
+<input id="tableName" placeholder="Exact table or view name">
 <input id="previewRows" type="number" min="1" max="100" value="25" style="width:100px">
-<button class="secondary" onclick="queueTableJob('table-count')">Count Rows</button>
-<button class="secondary" onclick="queueTableJob('table-preview')">Preview Table</button>
+<input id="tableReadLimit" type="number" min="1" max="2000" value="250" style="width:100px">
+<button class="secondary" onclick="queueTableJob('table-count')">Count HCDB Table</button>
+<button class="secondary" onclick="queueTableJob('table-preview')">Preview HCDB Table</button>
+<button class="secondary" onclick="queueSourceTableJob('source-schema')">Show Schema</button>
+<button class="secondary" onclick="queueSourceTableJob('table-read')">Read Rows</button>
+</div>
+<div class="card">
+<h2>Named historical read</h2>
+<p class="small">Runs a predefined SELECT-only preset. No arbitrary SQL is accepted. Limit is capped at 2,000 rows.</p>
+<input id="queryName" placeholder="receipts, sales-by-item, supplier-items, item-pricing, classifications, customers">
+<input id="sku" placeholder="Optional SKU / ItemLookupCode">
+<input id="customerId" placeholder="Optional RMS customer ID">
+<input id="supplierId" placeholder="Optional RMS supplier ID">
+<input id="startDate" placeholder="Optional start date (YYYY-MM-DD)">
+<input id="endDate" placeholder="Optional end date (exclusive YYYY-MM-DD)">
+<input id="queryLimit" type="number" min="1" max="2000" value="250" style="width:100px">
+<button class="secondary" onclick="queueReadQuery()">Run read query</button>
 </div>
 <div class="card"><h2>Recent jobs</h2><button class="secondary" onclick="loadJobs()">Refresh status</button>
 <div id="jobs"></div></div>
@@ -556,6 +585,30 @@ function saveKey(){key=document.getElementById('key').value.trim();sessionStorag
 async function api(url,opts={}){key=document.getElementById('key').value.trim();opts.headers={...(opts.headers||{}),'x-admin-key':key};let r=await fetch(url,opts);if(!r.ok)throw new Error(await r.text());return r.json();}
 async function queueJob(t){try{let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
 async function queueTableJob(t){try{let table=document.getElementById('tableName').value.trim();let rows=parseInt(document.getElementById('previewRows').value||'25',10);if(!table)throw new Error('Enter an exact table/view name first.');let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t,table_name:table,preview_rows:rows})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
+async function queueSourceJob(t,source){try{let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t,data_source:source})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
+async function queueSourceTableJob(t){try{
+  let table=document.getElementById('tableName').value.trim();
+  let source=document.getElementById('dataSource').value;
+  let limit=parseInt(document.getElementById('tableReadLimit').value||'250',10);
+  if(!table)throw new Error('Enter an exact table/view name first.');
+  let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t,data_source:source,table_name:table,limit:limit})});
+  alert('Queued job #'+j.id);loadJobs();
+}catch(e){alert(e.message)}}
+async function queueReadQuery(){try{
+  let body={
+    job_type:'read-query',
+    query_name:document.getElementById('queryName').value.trim(),
+    item_lookup_code:document.getElementById('sku').value.trim()||null,
+    customer_id:document.getElementById('customerId').value.trim()||null,
+    supplier_id:document.getElementById('supplierId').value.trim()||null,
+    start_date:document.getElementById('startDate').value.trim()||null,
+    end_date:document.getElementById('endDate').value.trim()||null,
+    limit:parseInt(document.getElementById('queryLimit').value||'250',10)
+  };
+  if(!body.query_name)throw new Error('Enter a named read query first.');
+  let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  alert('Queued job #'+j.id);loadJobs();
+}catch(e){alert(e.message)}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 async function loadJobs(){try{let d=await api('/admin/rms-jobs');let h='<table><tr><th>ID</th><th>Action</th><th>Status</th><th>Requested</th><th>Result</th></tr>';for(let j of d.jobs){let detail=j.error_text||j.result_text||'';h+='<tr><td>'+j.id+'</td><td>'+esc(j.job_type)+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.requested_at)+'</td><td><details><summary>view</summary><pre>'+esc(detail)+'</pre></details></td></tr>'}h+='</table>';document.getElementById('jobs').innerHTML=h;}catch(e){document.getElementById('jobs').innerHTML='<p class="bad">'+esc(e.message)+'</p>'}}
 if(key)loadJobs();
@@ -567,7 +620,7 @@ setInterval(()=>{if(document.getElementById('key').value.trim())loadJobs()},1500
 def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     job_type=body.job_type.strip().lower()
-    supported={"snapshot","test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count"}
+    supported={"snapshot","test","schema","product-schema","database-schema","database-tables","database-access","database-relations","migration-discovery","operational-discovery","source-tables","source-schema","table-read","read-catalog","read-query","safety-test","product-web-diagnostic","table-preview","table-count","customers-preview","product-export"}
     if job_type not in supported:
         raise HTTPException(400,"Unsupported RMS job type")
     args={}
@@ -578,15 +631,64 @@ def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
         if not all(ch.isalnum() or ch in "_$#@ " for ch in table_name):
             raise HTTPException(400,"Unsupported characters in table_name")
         args["table_name"]=table_name
+    if job_type in {"source-tables","source-schema","table-read"}:
+        data_source=(body.data_source or "store").strip().lower()
+        if data_source not in {"store","hq"}:
+            raise HTTPException(400,"data_source must be store or hq")
+        args["data_source"]=data_source
+    if job_type in {"source-schema","table-read"}:
+        table_name=(body.table_name or "").strip()
+        if not table_name or len(table_name)>128:
+            raise HTTPException(400,"A valid table_name is required")
+        if not all(ch.isalnum() or ch in "_$#@ " for ch in table_name):
+            raise HTTPException(400,"Unsupported characters in table_name")
+        args["table_name"]=table_name
+    if job_type=="table-read":
+        limit=int(body.limit or 250)
+        if limit<1 or limit>2000:
+            raise HTTPException(400,"limit must be between 1 and 2000")
+        args["limit"]=limit
     if job_type=="table-preview":
         rows=int(body.preview_rows or 25)
         if rows<1 or rows>100:
             raise HTTPException(400,"preview_rows must be between 1 and 100")
         args["preview_rows"]=rows
+    if job_type=="read-query":
+        query_name=(body.query_name or "").strip().lower()
+        allowed_queries={"receipts","sales-by-item","supplier-items","item-pricing","classifications","customers"}
+        if query_name not in allowed_queries:
+            raise HTTPException(400,"Unsupported RMS read query")
+        args["query_name"]=query_name
+        limit=int(body.limit or 250)
+        if limit<1 or limit>2000:
+            raise HTTPException(400,"limit must be between 1 and 2000")
+        args["limit"]=limit
+        optional={
+            "item_lookup_code":body.item_lookup_code,
+            "customer_id":body.customer_id,
+            "supplier_id":body.supplier_id,
+            "start_date":body.start_date,
+            "end_date":body.end_date,
+        }
+        for key,value in optional.items():
+            if value is None:
+                continue
+            value=str(value).strip()
+            if not value:
+                continue
+            if len(value)>128:
+                raise HTTPException(400,f"{key} is too long")
+            args[key]=value
     with db() as conn, conn.cursor() as cur:
-        cur.execute("""select id from rms_bridge_jobs
-            where job_type=%s and status in ('queued','running')
-            order by requested_at desc limit 1""",(job_type,))
+        if args:
+            cur.execute("""select id from rms_bridge_jobs
+                where job_type=%s and status in ('queued','running')
+                  and coalesce(args,'{}'::jsonb)=%s
+                order by requested_at desc limit 1""",(job_type,Jsonb(args)))
+        else:
+            cur.execute("""select id from rms_bridge_jobs
+                where job_type=%s and status in ('queued','running')
+                order by requested_at desc limit 1""",(job_type,))
         existing=cur.fetchone()
         if existing:
             return {"ok":True,"id":existing[0],"status":"already_pending"}
@@ -602,12 +704,26 @@ def list_rms_jobs(x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     with db() as conn, conn.cursor() as cur:
         cur.execute("""select id,job_type,status,requested_at,started_at,completed_at,
-            worker_name,result_text,error_text from rms_bridge_jobs
-            order by requested_at desc limit 30""")
+            worker_name,left(coalesce(result_text,''),20000),left(coalesce(error_text,''),8000)
+            from rms_bridge_jobs order by requested_at desc limit 30""")
         rows=cur.fetchall()
     keys=["id","job_type","status","requested_at","started_at","completed_at",
           "worker_name","result_text","error_text"]
     return {"jobs":[dict(zip(keys,r)) for r in rows]}
+
+
+@app.get("/admin/rms-jobs/{job_id}")
+def get_rms_job(job_id:int,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""select id,job_type,status,requested_at,started_at,completed_at,
+            worker_name,result_text,error_text,args from rms_bridge_jobs where id=%s""",(job_id,))
+        row=cur.fetchone()
+    if not row:
+        raise HTTPException(404,"RMS job not found")
+    keys=["id","job_type","status","requested_at","started_at","completed_at",
+          "worker_name","result_text","error_text","args"]
+    return dict(zip(keys,row))
 
 
 @app.post("/bridge/rms-jobs/claim")
@@ -639,8 +755,8 @@ def complete_rms_job(job_id:int,body:RmsJobComplete,x_admin_key:str|None=Header(
             set status=%s,completed_at=now(),worker_name=coalesce(%s,worker_name),
                 result_text=%s,error_text=%s
             where id=%s and status='running'""",
-            (status,body.worker_name,(body.result_text or "")[-20000:],
-             (body.error_text or "")[-8000:],job_id))
+            (status,body.worker_name,(body.result_text or "")[-1000000:],
+             (body.error_text or "")[-100000:],job_id))
         if cur.rowcount != 1:
             raise HTTPException(409,"Job is not running or does not exist")
         conn.commit()
