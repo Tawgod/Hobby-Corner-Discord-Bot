@@ -117,7 +117,7 @@ FROM [$escapedDb].INFORMATION_SCHEMA.TABLES
 WHERE TABLE_NAME='$escapedName';
 "@)
   if ($rows.Count -eq 0) { throw "Unknown $Source table or view: $name" }
-  if ($rows.Count -gt 1) { throw "Table name is ambiguous across schemas in $dbName: $name" }
+  if ($rows.Count -gt 1) { throw "Table name is ambiguous across schemas in ${dbName}: $name" }
   $schema = [string]$rows[0].TABLE_SCHEMA
   $table = [string]$rows[0].TABLE_NAME
   return "[" + $escapedDb + "].[" + $schema.Replace("]", "]]") + "].[" + $table.Replace("]", "]]") + "]"
