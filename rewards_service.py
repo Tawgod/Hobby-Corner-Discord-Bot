@@ -704,12 +704,26 @@ def list_rms_jobs(x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     with db() as conn, conn.cursor() as cur:
         cur.execute("""select id,job_type,status,requested_at,started_at,completed_at,
-            worker_name,result_text,error_text from rms_bridge_jobs
-            order by requested_at desc limit 30""")
+            worker_name,left(coalesce(result_text,''),20000),left(coalesce(error_text,''),8000)
+            from rms_bridge_jobs order by requested_at desc limit 30""")
         rows=cur.fetchall()
     keys=["id","job_type","status","requested_at","started_at","completed_at",
           "worker_name","result_text","error_text"]
     return {"jobs":[dict(zip(keys,r)) for r in rows]}
+
+
+@app.get("/admin/rms-jobs/{job_id}")
+def get_rms_job(job_id:int,x_admin_key:str|None=Header(default=None)):
+    admin(x_admin_key)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute("""select id,job_type,status,requested_at,started_at,completed_at,
+            worker_name,result_text,error_text,args from rms_bridge_jobs where id=%s""",(job_id,))
+        row=cur.fetchone()
+    if not row:
+        raise HTTPException(404,"RMS job not found")
+    keys=["id","job_type","status","requested_at","started_at","completed_at",
+          "worker_name","result_text","error_text","args"]
+    return dict(zip(keys,row))
 
 
 @app.post("/bridge/rms-jobs/claim")
@@ -741,8 +755,8 @@ def complete_rms_job(job_id:int,body:RmsJobComplete,x_admin_key:str|None=Header(
             set status=%s,completed_at=now(),worker_name=coalesce(%s,worker_name),
                 result_text=%s,error_text=%s
             where id=%s and status='running'""",
-            (status,body.worker_name,(body.result_text or "")[-20000:],
-             (body.error_text or "")[-8000:],job_id))
+            (status,body.worker_name,(body.result_text or "")[-1000000:],
+             (body.error_text or "")[-100000:],job_id))
         if cur.rowcount != 1:
             raise HTTPException(409,"Job is not running or does not exist")
         conn.commit()
