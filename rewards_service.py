@@ -655,7 +655,7 @@ def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
         args["preview_rows"]=rows
     if job_type=="read-query":
         query_name=(body.query_name or "").strip().lower()
-        allowed_queries={"receipts","sales-by-item","supplier-items","item-pricing","classifications","customers"}
+        allowed_queries={"receipts","sales-by-item","supplier-items","item-pricing","classifications","customers","item-movements","item-value-history","physical-inventory","account-history","purchase-order-lines","order-history"}
         if query_name not in allowed_queries:
             raise HTTPException(400,"Unsupported RMS read query")
         args["query_name"]=query_name
