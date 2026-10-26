@@ -385,6 +385,114 @@ ORDER BY C.LastUpdated DESC,C.ID;
 "@
       }
     }
+    "item-movements" {
+      Test-RequiredColumns @{ "InventoryTransferLog"=@("ID","ItemID","Quantity","DateTransferred","StoreID","ReferenceID","ReasonCodeID","CashierID","Type","Cost") ; "Item"=@("ID","ItemLookupCode","Description") }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "M.DateTransferred >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "M.DateTransferred < @EndDate" }
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $parts += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top M.ID AS MovementID,M.StoreID,M.ItemID,I.ItemLookupCode AS RMS_SKU,I.Description,
+ M.Quantity,M.DateTransferred,M.ReferenceID,M.ReferenceEntryID,M.ReasonCodeID,M.CashierID,
+ M.Type,M.Cost,M.BatchNumber,M.ComputedQuantity
+FROM InventoryTransferLog M
+LEFT JOIN Item I ON I.ID=M.ItemID
+$predicate
+ORDER BY M.DateTransferred DESC,M.ID DESC;
+"@
+      }
+    }
+    "item-value-history" {
+      Test-RequiredColumns @{ "ItemValueLog"=@("ID","ItemID","OldAmount","NewAmount","AmountType","LastUpdated","StoreID") ; "Item"=@("ID","ItemLookupCode","Description") }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "V.LastUpdated >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "V.LastUpdated < @EndDate" }
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $parts += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top V.ID,V.ItemID,I.ItemLookupCode AS RMS_SKU,I.Description,
+ V.OldAmount,V.NewAmount,V.AmountType,V.LastUpdated,V.StoreID
+FROM ItemValueLog V
+LEFT JOIN Item I ON I.ID=V.ItemID
+$predicate
+ORDER BY V.LastUpdated DESC,V.ID DESC;
+"@
+      }
+    }
+    "physical-inventory" {
+      Test-RequiredColumns @{
+        "PhysicalInventory"=@("ID","StoreID","OpenTime","CloseTime","Status","Description","Code")
+        "PhysicalInventoryEntry"=@("ID","PhysicalInventoryID","ItemID","CountTime","QuantityCounted","QuantityAdjusted","QuantitySold","QuantityReturned","Cost","Price")
+        "Item"=@("ID","ItemLookupCode","Description")
+      }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "P.OpenTime >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "P.OpenTime < @EndDate" }
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $parts += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top P.ID AS InventoryID,P.StoreID,P.OpenTime,P.CloseTime,P.Status,
+ P.Description AS InventoryDescription,P.Code AS InventoryCode,
+ E.ID AS InventoryEntryID,E.ItemID,I.ItemLookupCode AS RMS_SKU,I.Description AS ItemDescription,
+ E.CountTime,E.QuantityCounted,E.QuantityAdjusted,E.QuantitySold,E.QuantityReturned,E.Cost,E.Price
+FROM PhysicalInventory P
+JOIN PhysicalInventoryEntry E ON E.PhysicalInventoryID=P.ID AND E.StoreID=P.StoreID
+LEFT JOIN Item I ON I.ID=E.ItemID
+$predicate
+ORDER BY P.OpenTime DESC,P.ID DESC,E.ID DESC;
+"@
+      }
+    }
+    "account-history" {
+      Test-RequiredColumns @{ "AccountReceivableHistory"=@("ID","StoreID","AccountReceivableID","BatchNumber","Amount","PaymentID","Date","HistoryType","Comment") }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "H.[Date] >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "H.[Date] < @EndDate" }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top H.ID,H.StoreID,H.AccountReceivableID,H.BatchNumber,H.Amount,
+ H.PaymentID,H.[Date] AS HistoryDate,H.HistoryType,H.Comment,H.CashierID,
+ H.TransferArID,H.ReasonCodeID
+FROM AccountReceivableHistory H
+$predicate
+ORDER BY H.[Date] DESC,H.ID DESC;
+"@
+      }
+    }
+    "purchase-order-lines" {
+      Test-RequiredColumns @{ "PurchaseOrderEntry"=@("ID","StoreID","PurchaseOrderID","ItemID","QuantityOrdered","QuantityReceived","QuantityReceivedToDate","Price","LastUpdated","LastReceivedDate") ; "Item"=@("ID","ItemLookupCode","Description") }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "E.LastUpdated >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "E.LastUpdated < @EndDate" }
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $parts += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top E.ID,E.StoreID,E.PurchaseOrderID,E.ItemID,I.ItemLookupCode AS RMS_SKU,
+ I.Description,E.ItemDescription,E.OrderNumber,E.QuantityOrdered,E.QuantityReceived,
+ E.QuantityReceivedToDate,E.Price,E.LastUpdated,E.LastReceivedDate,E.ShippingPerItem,E.OtherFeesPerItem
+FROM PurchaseOrderEntry E
+LEFT JOIN Item I ON I.ID=E.ItemID
+$predicate
+ORDER BY E.LastUpdated DESC,E.ID DESC;
+"@
+      }
+    }
+    "order-history" {
+      Test-RequiredColumns @{ "OrderHistory"=@("ID","StoreID","BatchNumber","Date","OrderID","CashierID","DeltaDeposit","TransactionNumber","Comment") }
+      $parts=@()
+      if ($params.ContainsKey("StartDate")) { $parts += "H.[Date] >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "H.[Date] < @EndDate" }
+      $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
+      return @{ Parameters=$params; Sql=@"
+SELECT TOP $top H.ID,H.StoreID,H.BatchNumber,H.[Date] AS HistoryDate,H.OrderID,
+ H.CashierID,H.DeltaDeposit,H.TransactionNumber,H.Comment
+FROM OrderHistory H
+$predicate
+ORDER BY H.[Date] DESC,H.ID DESC;
+"@
+      }
+    }
     default { throw "Unknown read query '$Name'. Use -Action read-catalog for allowed presets." }
   }
 }
@@ -592,7 +700,13 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
       [pscustomobject]@{QueryName="supplier-items";Purpose="Supplier-item relationships/reorder numbers/costs";Source="SupplierList + Supplier + Item"},
       [pscustomobject]@{QueryName="item-pricing";Purpose="Current RMS cost/retail snapshot";Source="Item"},
       [pscustomobject]@{QueryName="classifications";Purpose="Current department/category assignment";Source="Item + Department + Category"},
-      [pscustomobject]@{QueryName="customers";Purpose="Customer master/visit/sales summary";Source="Customer"}
+      [pscustomobject]@{QueryName="customers";Purpose="Customer master/visit/sales summary";Source="Customer"},
+      [pscustomobject]@{QueryName="item-movements";Purpose="Item movement records";Source="InventoryTransferLog + Item"},
+      [pscustomobject]@{QueryName="item-value-history";Purpose="Historical value changes by item";Source="ItemValueLog + Item"},
+      [pscustomobject]@{QueryName="physical-inventory";Purpose="Physical inventory counts and adjustments";Source="PhysicalInventory + PhysicalInventoryEntry + Item"},
+      [pscustomobject]@{QueryName="account-history";Purpose="AR account history events";Source="AccountReceivableHistory"},
+      [pscustomobject]@{QueryName="purchase-order-lines";Purpose="PO line quantities/receipt history";Source="PurchaseOrderEntry + Item"},
+      [pscustomobject]@{QueryName="order-history";Purpose="Customer order change/deposit history";Source="OrderHistory"}
     ) | Format-Table -AutoSize
   }
 
