@@ -38,857 +38,8 @@ function New-SqlConnection {
 }
 
 function Assert-ReadOnlySql([string]$Query) {
-  $normalized = ($Query -replace '(?s)/\*.*?\*/', ' ' -replace '(?m)--.*
-    $rows = @()
-    while ($reader.Read()) {
-      $obj = [ordered]@{}
-      for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-        $name = $reader.GetName($i)
-        $value = if ($reader.IsDBNull($i)) { $null } else { $reader.GetValue($i) }
-        if ($value -is [DateTime]) { $value = $value.ToString("o") }
-        $obj[$name] = $value
-      }
-      $rows += [pscustomobject]$obj
-    }
-    $reader.Close()
-    return $rows
-  } finally {
-    if ($conn.State -ne "Closed") { $conn.Close() }
-  }
-}
-
-function Resolve-SafeTableName([string]$RequestedTable) {
-  $name = [string]$RequestedTable
-  if ([string]::IsNullOrWhiteSpace($name)) { throw "TableName is required." }
-  $escaped = $name.Replace("'", "''")
-  $rows = @(Invoke-SqlRows "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$escaped';")
-  if ($rows.Count -eq 0) { throw "Unknown RMS table or view: $name" }
-  if ($rows.Count -gt 1) { throw "Table name is ambiguous across schemas: $name" }
-  $schema = [string]$rows[0].TABLE_SCHEMA
-  $table = [string]$rows[0].TABLE_NAME
-  return "[" + $schema.Replace("]", "]]") + "].[" + $table.Replace("]", "]]") + "]"
-}
-
-function Get-SafeDatabaseName([string]$Source) {
-  $dbName = if ($Source -eq "hq") {
-    if ($config.hqDatabase) { [string]$config.hqDatabase } else { "HQcorp" }
-  } else {
-    [string]$config.database
-  }
-  if ([string]::IsNullOrWhiteSpace($dbName) -or $dbName -notmatch '^[A-Za-z0-9_$#@ .-]+
-function Invoke-BridgePost([hashtable]$Body) {
-  $headers = @{ "x-admin-key" = $config.apiKey }
-  $json = $Body | ConvertTo-Json -Depth 8 -Compress
-  $uri = "$($config.apiBaseUrl.TrimEnd('/'))/admin/migration/rms-snapshot"
-  return Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType "application/json" -Body $json
-}
-
-$customerQuery = @"
-SELECT
-    C.ID                 AS RMSCustomerID,
-    C.AccountNumber,
-    C.Employee,
-    C.FirstName,
-    C.LastName,
-    C.Company,
-    C.EmailAddress,
-    C.PhoneNumber,
-    C.FaxNumber,
-    C.Address,
-    C.Address2,
-    C.City,
-    C.State,
-    C.Zip,
-    C.Country,
-    C.TaxNumber,
-    C.TaxExempt,
-    C.AccountBalance,
-    C.TotalSales,
-    C.AccountOpened,
-    C.LastVisit,
-    C.TotalVisits,
-    C.TotalSavings,
-    C.CurrentDiscount    AS LegacyDiscount,
-    C.Vouchers,
-    C.LastUpdated
-FROM Customer C
-ORDER BY C.ID;
-"@
-
-$productExportQuery = @"
-SELECT
-    I.ID                                      AS RMS_ItemID,
-    I.ItemLookupCode                          AS RMS_SKU,
-    I.Description                             AS RMS_Description,
-    I.DepartmentID                            AS RMS_DepartmentID,
-    D.Name                                    AS RMS_Department,
-    D.Code                                    AS RMS_DepartmentCode,
-    I.CategoryID                              AS RMS_CategoryID,
-    C.Name                                    AS RMS_Category,
-    C.Code                                    AS RMS_CategoryCode,
-    I.SupplierID                              AS RMS_SupplierID,
-    S.SupplierName                            AS RMS_Supplier,
-    S.Code                                    AS RMS_SupplierCode,
-    PSL.ReorderNumber                         AS RMS_SupplierItemCode,
-    PSL.Cost                                  AS RMS_SupplierListCost,
-    I.Cost,
-    I.LastCost,
-    I.ReplacementCost,
-    I.Price                                   AS RetailPrice,
-    I.MSRP,
-    I.Quantity                                AS RMS_Quantity,
-    I.ReorderPoint                            AS RMS_ReorderPoint,
-    I.RestockLevel                            AS RMS_RestockLevel,
-    I.LastSold,
-    I.LastReceived,
-    I.DateCreated,
-    I.LastUpdated,
-    I.Inactive,
-    I.DoNotOrder,
-    I.ExtendedDescription,
-    PAM.WebDescription                       AS RMS_WebDescription,
-    I.SubDescription1,
-    I.SubDescription2,
-    I.SubDescription3                         AS Brand,
-    I.SubDescription3,
-    I.PictureName,
-    I.Weight,
-    BAR.PrimaryBarcode                        AS RMS_UPC,
-    ALS.AllAliases                            AS RMS_Aliases
-FROM Item I
-LEFT JOIN Department D ON D.ID = I.DepartmentID
-LEFT JOIN Category C ON C.ID = I.CategoryID
-LEFT JOIN Supplier S ON S.ID = I.SupplierID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.HQID
-OUTER APPLY (
-    SELECT TOP 1
-        SL.ReorderNumber,
-        SL.Cost
-    FROM SupplierList SL
-    WHERE SL.ItemID = I.ID
-      AND SL.SupplierID = I.SupplierID
-    ORDER BY SL.ID
-) PSL
-OUTER APPLY (
-    SELECT TOP 1 A.Alias AS PrimaryBarcode
-    FROM Alias A
-    WHERE A.ItemID = I.ID
-      AND A.Alias IS NOT NULL
-      AND LTRIM(RTRIM(A.Alias)) <> ''
-      AND A.Alias NOT LIKE '%[^0-9]%'
-      AND LEN(LTRIM(RTRIM(A.Alias))) IN (8, 12, 13, 14)
-    ORDER BY
-      CASE LEN(LTRIM(RTRIM(A.Alias)))
-        WHEN 12 THEN 1
-        WHEN 13 THEN 2
-        WHEN 14 THEN 3
-        WHEN 8 THEN 4
-        ELSE 9
-      END,
-      A.ID
-) BAR
-OUTER APPLY (
-    SELECT STUFF((
-        SELECT '|' + REPLACE(LTRIM(RTRIM(A2.Alias)), '|', '')
-        FROM Alias A2
-        WHERE A2.ItemID = I.ID
-          AND A2.Alias IS NOT NULL
-          AND LTRIM(RTRIM(A2.Alias)) <> ''
-        ORDER BY A2.ID
-        FOR XML PATH(''), TYPE
-    ).value('.', 'nvarchar(max)'), 1, 1, '') AS AllAliases
-) ALS
-ORDER BY I.ID;
-"@
-
-function Test-RequiredColumns([hashtable]$Required) {
-  foreach ($table in $Required.Keys) {
-    $escapedTable = ([string]$table).Replace("'", "''")
-    $columns = @(Invoke-SqlRows "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME='$escapedTable';" | ForEach-Object { [string]$_.COLUMN_NAME })
-    if ($columns.Count -eq 0) { throw "Required RMS table/view is not present: $table" }
-    foreach ($column in @($Required[$table])) {
-      if ($columns -notcontains [string]$column) {
-        throw "Read preset requires $table.$column, but that column is not present on this RMS database."
-      }
-    }
-  }
-}
-
-function Get-ReadQuery([string]$Name) {
-  $normalized = ([string]$Name).Trim().ToLowerInvariant()
-  $top = [Math]::Max(1, [Math]::Min([int]$Limit, 2000))
-  $where = @()
-  $params = @{}
-
-  if (-not [string]::IsNullOrWhiteSpace($StartDate)) {
-    $parsed = [DateTime]::MinValue
-    if (-not [DateTime]::TryParse($StartDate, [ref]$parsed)) { throw "Invalid StartDate: $StartDate" }
-    $where += "T.Time >= @StartDate"
-    $params["StartDate"] = $parsed
-  }
-  if (-not [string]::IsNullOrWhiteSpace($EndDate)) {
-    $parsed = [DateTime]::MinValue
-    if (-not [DateTime]::TryParse($EndDate, [ref]$parsed)) { throw "Invalid EndDate: $EndDate" }
-    $where += "T.Time < @EndDate"
-    $params["EndDate"] = $parsed
-  }
-
-  switch ($normalized) {
-    "receipts" {
-      Test-RequiredColumns @{
-        "PUBLIC_Transaction" = @("StoreID","BatchNumber","TransactionNumber","Time","CustomerID","Total","SalesTax")
-      }
-      if (-not [string]::IsNullOrWhiteSpace($CustomerID)) {
-        $where += "T.CustomerID = @CustomerID"
-        $params["CustomerID"] = $CustomerID
-      }
-      $predicate = if ($where.Count) { "WHERE " + ($where -join " AND ") } else { "" }
-      return @{
-        Parameters = $params
-        Sql = @"
-SELECT TOP $top
-    T.StoreID,
-    T.BatchNumber,
-    T.TransactionNumber,
-    T.Time AS SaleDate,
-    T.CustomerID,
-    CAST(T.Total AS decimal(14,2)) AS GrossTotal,
-    CAST(ISNULL(T.SalesTax,0) AS decimal(14,2)) AS SalesTax,
-    CAST(T.Total-ISNULL(T.SalesTax,0) AS decimal(14,2)) AS PretaxAmount
-FROM PUBLIC_Transaction T
-$predicate
-ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber;
-"@
-      }
-    }
-    "sales-by-item" {
-      Test-RequiredColumns @{
-        "PUBLIC_Transaction" = @("StoreID","TransactionNumber","Time","CustomerID")
-        "PUBLIC_TransactionEntry" = @("StoreID","TransactionNumber","ItemID","Quantity","Price")
-        "Item" = @("ID","ItemLookupCode","Description")
-      }
-      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) {
-        $where += "I.ItemLookupCode = @Sku"
-        $params["Sku"] = $ItemLookupCode.Trim()
-      }
-      $predicate = if ($where.Count) { "WHERE " + ($where -join " AND ") } else { "" }
-      return @{
-        Parameters = $params
-        Sql = @"
-SELECT TOP $top
-    T.StoreID,
-    T.TransactionNumber,
-    T.Time AS SaleDate,
-    T.CustomerID,
-    E.ItemID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    E.Quantity,
-    CAST(E.Price AS decimal(14,2)) AS UnitPrice
-FROM PUBLIC_TransactionEntry E
-JOIN PUBLIC_Transaction T
-  ON T.StoreID=E.StoreID AND T.TransactionNumber=E.TransactionNumber
-LEFT JOIN Item I ON I.ID=E.ItemID
-$predicate
-ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber,E.ItemID;
-"@
-      }
-    }
-    "supplier-items" {
-      Test-RequiredColumns @{
-        "Supplier" = @("ID","SupplierName","Code")
-        "SupplierList" = @("ID","ItemID","SupplierID","ReorderNumber","Cost")
-        "Item" = @("ID","ItemLookupCode","Description","SupplierID")
-      }
-      $supplierWhere = ""
-      if (-not [string]::IsNullOrWhiteSpace($SupplierID)) {
-        $supplierWhere = "WHERE SL.SupplierID = @SupplierID"
-        $params["SupplierID"] = $SupplierID
-      }
-      return @{
-        Parameters = $params
-        Sql = @"
-SELECT TOP $top
-    SL.SupplierID AS RMS_SupplierID,
-    S.SupplierName AS RMS_Supplier,
-    S.Code AS RMS_SupplierCode,
-    SL.ItemID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    SL.ReorderNumber AS RMS_SupplierItemCode,
-    CAST(SL.Cost AS decimal(14,2)) AS SupplierListCost,
-    CASE WHEN I.SupplierID=SL.SupplierID THEN 1 ELSE 0 END AS IsPrimarySupplier
-FROM SupplierList SL
-LEFT JOIN Supplier S ON S.ID=SL.SupplierID
-LEFT JOIN Item I ON I.ID=SL.ItemID
-$supplierWhere
-ORDER BY S.SupplierName,I.ItemLookupCode,SL.ID;
-"@
-      }
-    }
-    "item-pricing" {
-      Test-RequiredColumns @{
-        "Item" = @("ID","ItemLookupCode","Description","Cost","LastCost","ReplacementCost","Price","MSRP","LastUpdated")
-      }
-      $itemWhere = ""
-      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) {
-        $itemWhere = "WHERE I.ItemLookupCode = @Sku"
-        $params["Sku"] = $ItemLookupCode.Trim()
-      }
-      return @{
-        Parameters = $params
-        Sql = @"
-SELECT TOP $top
-    I.ID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    CAST(I.Cost AS decimal(14,2)) AS Cost,
-    CAST(I.LastCost AS decimal(14,2)) AS LastCost,
-    CAST(I.ReplacementCost AS decimal(14,2)) AS ReplacementCost,
-    CAST(I.Price AS decimal(14,2)) AS RetailPrice,
-    CAST(I.MSRP AS decimal(14,2)) AS MSRP,
-    I.LastUpdated
-FROM Item I
-$itemWhere
-ORDER BY I.LastUpdated DESC,I.ID;
-"@
-      }
-    }
-    "classifications" {
-      Test-RequiredColumns @{
-        "Item" = @("ID","ItemLookupCode","Description","DepartmentID","CategoryID")
-        "Department" = @("ID","Name","Code")
-        "Category" = @("ID","Name","Code")
-      }
-      return @{
-        Parameters = @{}
-        Sql = @"
-SELECT TOP $top
-    I.ID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    D.ID AS RMS_DepartmentID,
-    D.Name AS RMS_Department,
-    D.Code AS RMS_DepartmentCode,
-    C.ID AS RMS_CategoryID,
-    C.Name AS RMS_Category,
-    C.Code AS RMS_CategoryCode
-FROM Item I
-LEFT JOIN Department D ON D.ID=I.DepartmentID
-LEFT JOIN Category C ON C.ID=I.CategoryID
-ORDER BY D.Name,C.Name,I.ItemLookupCode;
-"@
-      }
-    }
-    "customers" {
-      Test-RequiredColumns @{
-        "Customer" = @("ID","AccountNumber","FirstName","LastName","Company","EmailAddress","PhoneNumber","AccountOpened","LastVisit","TotalVisits","TotalSales","LastUpdated")
-      }
-      return @{
-        Parameters = @{}
-        Sql = @"
-SELECT TOP $top
-    C.ID AS RMSCustomerID,
-    C.AccountNumber,
-    C.FirstName,
-    C.LastName,
-    C.Company,
-    C.EmailAddress,
-    C.PhoneNumber,
-    C.AccountOpened,
-    C.LastVisit,
-    C.TotalVisits,
-    C.TotalSales,
-    C.LastUpdated
-FROM Customer C
-ORDER BY C.LastUpdated DESC,C.ID;
-"@
-      }
-    }
-    default { throw "Unknown read query '$Name'. Use -Action read-catalog for the allowed presets." }
-  }
-}
-
-$transactionQuery = @"
-SELECT
-    T.CustomerID                                  AS RMSCustomerID,
-    T.StoreID,
-    T.BatchNumber,
-    T.TransactionNumber,
-    T.Time                                        AS SaleDate,
-    CAST(T.Total AS decimal(14,2))                 AS GrossTotal,
-    CAST(ISNULL(T.SalesTax, 0) AS decimal(14,2))  AS SalesTax,
-    CAST(T.Total - ISNULL(T.SalesTax, 0) AS decimal(14,2)) AS PretaxAmount
-FROM PUBLIC_Transaction T
-JOIN Customer C ON C.ID = T.CustomerID
-WHERE
-    T.CustomerID IS NOT NULL
-    AND T.CustomerID <> 0
-    AND T.Time >= DATEADD(day, -91, GETDATE())
-    AND T.Time <= GETDATE()
-    AND ISNULL(C.Employee, 0) <> 1
-ORDER BY
-    T.CustomerID,
-    T.Time,
-    T.TransactionNumber;
-"@
-
-switch ($Action) {
-  "test" {
-    $row = Invoke-SqlRows "SELECT DB_NAME() AS DatabaseName, @@SERVERNAME AS ServerName, @@VERSION AS SqlVersion;"
-    Write-Host "SQL connection succeeded." -ForegroundColor Green
-    $row | Format-List
-    $health = Invoke-RestMethod -Method Get -Uri "$($config.apiBaseUrl.TrimEnd('/'))/health"
-    Write-Host "Railway API connection succeeded." -ForegroundColor Green
-    $health | Format-List
-  }
-
-  "schema" {
-    $q = @"
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME IN ('Customer','PUBLIC_Transaction')
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    Invoke-SqlRows $q | Format-Table -AutoSize
-  }
-
-  "product-schema" {
-    $q = @"
-SELECT
-    TABLE_NAME,
-    COLUMN_NAME,
-    DATA_TYPE,
-    CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE
-    TABLE_NAME LIKE '%Item%'
-    OR TABLE_NAME LIKE '%Product%'
-    OR TABLE_NAME LIKE '%Inventory%'
-    OR TABLE_NAME LIKE '%Supplier%'
-    OR TABLE_NAME LIKE '%Department%'
-    OR TABLE_NAME LIKE '%Category%'
-    OR TABLE_NAME LIKE '%Purchase%'
-    OR TABLE_NAME LIKE '%Transaction%'
-    OR COLUMN_NAME LIKE '%Reorder%'
-    OR COLUMN_NAME LIKE '%Restock%'
-    OR COLUMN_NAME LIKE '%Quantity%'
-    OR COLUMN_NAME LIKE '%Qty%'
-    OR COLUMN_NAME LIKE '%OnHand%'
-    OR COLUMN_NAME LIKE '%OnOrder%'
-    OR COLUMN_NAME LIKE '%Supplier%'
-    OR COLUMN_NAME LIKE '%Department%'
-    OR COLUMN_NAME LIKE '%Category%'
-    OR COLUMN_NAME LIKE '%Discontinued%'
-    OR COLUMN_NAME LIKE '%Inactive%'
-    OR COLUMN_NAME LIKE '%LastSold%'
-    OR COLUMN_NAME LIKE '%LastSale%'
-    OR COLUMN_NAME LIKE '%LastReceived%'
-    OR COLUMN_NAME LIKE '%LastPurchase%'
-    OR COLUMN_NAME LIKE '%Cost%'
-    OR COLUMN_NAME LIKE '%Price%'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    $rows = @(Invoke-SqlRows $q)
-    Write-Host "Product/inventory schema candidates: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-schema" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.NUMERIC_PRECISION,
-    C.NUMERIC_SCALE,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Database schema rows: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-tables" {
-    $q = @"
-SELECT
-    TABLE_SCHEMA,
-    TABLE_NAME,
-    TABLE_TYPE
-FROM INFORMATION_SCHEMA.TABLES
-ORDER BY TABLE_SCHEMA,TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-access" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    CAST(HAS_PERMS_BY_NAME(
-        QUOTENAME(T.TABLE_SCHEMA) + '.' + QUOTENAME(T.TABLE_NAME),
-        'OBJECT',
-        'SELECT'
-    ) AS int) AS CanSelect
-FROM INFORMATION_SCHEMA.TABLES T
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    $readable=@($rows | Where-Object { [int]$_.CanSelect -eq 1 })
-    $blocked=@($rows | Where-Object { [int]$_.CanSelect -ne 1 })
-    Write-Host "Visible tables/views: $($rows.Count)" -ForegroundColor Green
-    Write-Host "Readable with current SQL login: $($readable.Count)" -ForegroundColor Green
-    Write-Host "Not readable with current SQL login: $($blocked.Count)" -ForegroundColor $(if($blocked.Count -eq 0){"Green"}else{"Yellow"})
-    $rows | Format-Table -AutoSize
-  }
-
-
-  "source-tables" {
-    $dbName = Get-SafeDatabaseName $DataSource
-    $escapedDb = $dbName.Replace("]", "]]")
-    $rows = @(Invoke-SqlRows @"
-SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_TYPE
-FROM [$escapedDb].INFORMATION_SCHEMA.TABLES
-ORDER BY TABLE_SCHEMA,TABLE_NAME;
-"@)
-    Write-Host "$DataSource database: $dbName" -ForegroundColor Green
-    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "source-schema" {
-    $dbName = Get-SafeDatabaseName $DataSource
-    $escapedDb = $dbName.Replace("]", "]]")
-    if (-not [string]::IsNullOrWhiteSpace($TableName)) {
-      $escapedName = $TableName.Replace("'", "''")
-      $where = "WHERE T.TABLE_NAME='$escapedName'"
-    } else {
-      $where = ""
-    }
-    $rows = @(Invoke-SqlRows @"
-SELECT
-    T.TABLE_SCHEMA,T.TABLE_NAME,T.TABLE_TYPE,
-    C.ORDINAL_POSITION,C.COLUMN_NAME,C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,C.NUMERIC_PRECISION,C.NUMERIC_SCALE,C.IS_NULLABLE
-FROM [$escapedDb].INFORMATION_SCHEMA.TABLES T
-LEFT JOIN [$escapedDb].INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-$where
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
-"@)
-    Write-Host "$DataSource database schema rows: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "table-read" {
-    $top = [Math]::Max(1,[Math]::Min([int]$Limit,2000))
-    $safeTable = Resolve-SafeSourceTable $DataSource $TableName
-    Write-Host "Reading TOP $top from $DataSource::$TableName" -ForegroundColor Green
-    Invoke-SqlRows "SELECT TOP $top * FROM $safeTable;" | Format-Table -AutoSize
-  }
-
-  "safety-test" {
-    Assert-ReadOnlySql "SELECT 1 AS SafeRead;"
-    $blocked = $false
-    try { Assert-ReadOnlySql "UPDATE Item SET Price=0;" } catch { $blocked = $true }
-    if (-not $blocked) { throw "Read-only SQL guard failed to block UPDATE." }
-    $blockedInto = $false
-    try { Assert-ReadOnlySql "SELECT * INTO UnsafeCopy FROM Item;" } catch { $blockedInto = $true }
-    if (-not $blockedInto) { throw "Read-only SQL guard failed to block SELECT INTO." }
-    Write-Host "Read-only SQL safety guard passed." -ForegroundColor Green
-  }
-
-  "read-catalog" {
-    @(
-      [pscustomobject]@{ QueryName="receipts"; Purpose="Sales receipt headers / customer purchase history"; Source="PUBLIC_Transaction"; Status="Ready - existing bridge columns" },
-      [pscustomobject]@{ QueryName="sales-by-item"; Purpose="Historical item/SKU sales lines by date"; Source="PUBLIC_Transaction + PUBLIC_TransactionEntry + Item"; Status="Schema-checked at runtime" },
-      [pscustomobject]@{ QueryName="supplier-items"; Purpose="Supplier-to-item relationships, reorder numbers and costs"; Source="Supplier + SupplierList + Item"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="item-pricing"; Purpose="Current RMS cost/retail fields and last-updated timestamp"; Source="Item"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="classifications"; Purpose="Current department/category assignment by item"; Source="Item + Department + Category"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="customers"; Purpose="Customer master / visit and sales summary fields"; Source="Customer"; Status="Ready - existing migration columns" }
-    ) | Format-Table -AutoSize
-    Write-Host ""
-    Write-Host "Purchase-order, inventory-movement, pricing-history and legacy web/HQ history tables are discovery targets until their live columns are confirmed." -ForegroundColor Yellow
-  }
-
-  "read-query" {
-    if ([string]::IsNullOrWhiteSpace($QueryName)) { throw "QueryName is required for read-query." }
-    $spec = Get-ReadQuery $QueryName
-    $rows = @(Invoke-SqlRows $spec.Sql $spec.Parameters)
-    Write-Host "Read preset '$QueryName' returned $($rows.Count) row(s). Limit: $([Math]::Max(1,[Math]::Min([int]$Limit,2000)))" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "operational-discovery" {
-    $targets = @(
-      "PUBLIC_Transaction","PUBLIC_TransactionEntry","Transaction","TransactionEntry",
-      "Item","ItemDynamic","Alias","Department","Category",
-      "Supplier","SupplierList","PurchaseOrder","PurchaseOrderEntry","PurchaseOrderEntryDetail",
-      "InventoryTransfer","InventoryTransferEntry","InventoryTransferLog","InventoryMovement","ItemMovement",
-      "Customer","AccountReceivable","AccountReceivableHistory","ARHistoryMirror",
-      "Voucher","VoucherEntry","VoucherFormatNumber",
-      "NitroSell_ProductNavigation","nitrosell_productphotos","NitroSell_WebCategory","NitroSell_WebDepartment",
-      "NitroSell_WebProductNavigation","WebLinK_item","WebLinK_itemdynamic","WebLinK_productimages",
-      "WebLinK_productnavigation","WebLinK_category","nitroasl_pamtable"
-    )
-    foreach ($target in $targets) {
-      $escaped = $target.Replace("'","''")
-      $meta = @(Invoke-SqlRows @"
-SELECT T.TABLE_SCHEMA,T.TABLE_NAME,T.TABLE_TYPE,C.ORDINAL_POSITION,C.COLUMN_NAME,C.DATA_TYPE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-WHERE T.TABLE_NAME='$escaped'
-ORDER BY C.ORDINAL_POSITION;
-"@)
-      if ($meta.Count -eq 0) { continue }
-      Write-Host ""
-      Write-Host ("=" * 88) -ForegroundColor DarkGray
-      Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
-      $meta | Format-Table -AutoSize
-      try {
-        $safe = Resolve-SafeTableName $target
-        $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
-        Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
-      } catch {
-        Write-Host "Count failed: $($_.Exception.Message)" -ForegroundColor Yellow
-      }
-    }
-
-    Write-Host ""
-    Write-Host "Declared foreign keys:" -ForegroundColor Cyan
-    @(Invoke-SqlRows @"
-SELECT
-    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
-    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
-    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
-    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
-    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
-    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
-FROM sys.foreign_keys fk
-JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
-ORDER BY ChildSchema,ChildTable,fkc.constraint_column_id;
-"@) | Format-Table -AutoSize
-  }
-
-  "migration-discovery" {
-    $targets = @(
-      "NitroSell_ProductNavigation",
-      "nitrosell_productphotos",
-      "NitroSell_WebCategory",
-      "NitroSell_WebDepartment",
-      "NitroSell_WebProductNavigation",
-      "WebLinK_item",
-      "WebLinK_itemdynamic",
-      "WebLinK_nitrosellpicturedetails",
-      "WebLinK_productimages",
-      "WebLinK_productnavigation",
-      "WebLinK_category",
-      "Voucher",
-      "VoucherEntry",
-      "VoucherFormatNumber",
-      "AccountReceivable",
-      "AccountReceivableHistory",
-      "ARHistoryMirror",
-      "Transaction",
-      "TransactionEntry",
-      "PUBLIC_Transaction",
-      "PUBLIC_TransactionEntry",
-      "PurchaseOrder",
-      "PurchaseOrderEntry",
-      "PurchaseOrderEntryDetail"
-    )
-
-    foreach ($target in $targets) {
-      Write-Host ""
-      Write-Host ("=" * 88) -ForegroundColor DarkGray
-      Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
-
-      $escaped = $target.Replace("'", "''")
-      $meta = @(Invoke-SqlRows @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-WHERE T.TABLE_NAME='$escaped'
-ORDER BY C.ORDINAL_POSITION;
-"@)
-
-      if ($meta.Count -eq 0) {
-        Write-Host "Not present." -ForegroundColor Yellow
-        continue
-      }
-
-      $meta | Format-Table -AutoSize
-
-      $safe = Resolve-SafeTableName $target
-      $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
-      Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
-
-      Write-Host "Sample rows (TOP 5):" -ForegroundColor DarkCyan
-      try {
-        @(Invoke-SqlRows "SELECT TOP 5 * FROM $safe;") | Format-List
-      } catch {
-        Write-Host "Sample read failed: $($_.Exception.Message)" -ForegroundColor Yellow
-      }
-    }
-  }
-
-
-  "product-web-diagnostic" {
-    $q = @"
-SELECT TOP 100
-    I.ID AS StoreItemID,
-    I.HQID AS HQItemID,
-    I.ItemLookupCode,
-    I.Description,
-    I.ExtendedDescription,
-    I.Content,
-    I.PictureName,
-    LPAM.WebDescription AS LocalPAM_WebDescription,
-    WRONGPAM.WebDescription AS HQPAM_ByStoreItemID,
-    HPAM.WebDescription AS HQPAM_ByHQID
-FROM Item I
-LEFT JOIN dbo.nitroasl_pamtable LPAM
-  ON LPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable WRONGPAM
-  ON WRONGPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable HPAM
-  ON HPAM.ItemID = I.HQID
-WHERE I.ItemLookupCode IN (
-    'GW48-111','WZK96383','DOW7201','TES1133TT','TES1162TT','BSI-117',
-    'ULP81126','ULP81156','TES1103TT','TES1104TT','TES1108TT',
-    'TES1110TT','TES1111TT','TES1112TT'
-)
-ORDER BY I.ItemLookupCode;
-"@
-    try {
-      $rows = @(Invoke-SqlRows $q)
-      Write-Host "Web-description diagnostic rows: $($rows.Count)" -ForegroundColor Green
-      $rows | Format-List
-    } catch {
-      Write-Host "PAM web-description diagnostic failed; showing PAM schemas instead." -ForegroundColor Yellow
-      foreach ($target in @("nitroasl_pamtable")) {
-        Write-Host ""
-        Write-Host "LOCAL SCHEMA: $target" -ForegroundColor Cyan
-        $escaped = $target.Replace("'", "''")
-        @(Invoke-SqlRows @"
-SELECT ORDINAL_POSITION,COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME='$escaped'
-ORDER BY ORDINAL_POSITION;
-"@) | Format-Table -AutoSize
-      }
-      throw
-    }
-  }
-
-  "database-relations" {
-    $q = @"
-SELECT
-    fk.name AS ForeignKeyName,
-    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
-    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
-    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
-    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
-    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
-    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
-FROM sys.foreign_keys fk
-JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
-ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Foreign-key relationships found: $($rows.Count)" -ForegroundColor Green
-    if ($rows.Count -eq 0) { Write-Host "No declared foreign keys were found. RMS may rely on implicit relationships." }
-    else { $rows | Format-Table -AutoSize }
-  }
-
-  "table-count" {
-    $safeTable=Resolve-SafeTableName $TableName
-    $rows=Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safeTable;"
-    Write-Host "Table: $TableName" -ForegroundColor Green
-    $rows | Format-List
-  }
-
-  "table-preview" {
-    if ($PreviewRows -lt 1) { $PreviewRows=25 }
-    if ($PreviewRows -gt 100) { $PreviewRows=100 }
-    $safeTable=Resolve-SafeTableName $TableName
-    Write-Host "Previewing TOP $PreviewRows rows from $TableName" -ForegroundColor Green
-    Invoke-SqlRows "SELECT TOP $PreviewRows * FROM $safeTable;" | Format-Table -AutoSize
-  }
-
-  "product-export" {
-    $exportDir = Split-Path -Parent $ProductExportPath
-    if (-not (Test-Path $exportDir)) {
-      New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
-    }
-
-    Write-Host "Reading enriched RMS product catalog..." -ForegroundColor Cyan
-    $rows = @(Invoke-SqlRows $productExportQuery)
-    Write-Host "Products read: $($rows.Count)" -ForegroundColor Green
-
-    $rows | Export-Csv -Path $ProductExportPath -NoTypeInformation -Encoding UTF8
-    $file = Get-Item $ProductExportPath
-    Write-Host "Product export complete." -ForegroundColor Green
-    Write-Host "Path: $($file.FullName)"
-    Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
-    Write-Host "Brand source: Item.SubDescription3"
-    Write-Host "UPC/aliases source: Alias"
-    Write-Host "Supplier item code source: SupplierList.ReorderNumber"
-    Write-Host "Supplier code source: Supplier.Code"
-    Write-Host "Web description source: HQcorp.dbo.nitroasl_pamtable.WebDescription joined on Item.HQID"
-  }
-
-  "customers-preview" {
-    $previewQuery = $customerQuery.Replace("SELECT`n    C.ID", "SELECT TOP 10`n    C.ID")
-    Invoke-SqlRows $previewQuery | Format-Table -AutoSize
-  }
-
-  "snapshot" {
-    $customers = @(Invoke-SqlRows $customerQuery)
-    $transactions = @(Invoke-SqlRows $transactionQuery)
-    Write-Host "Customers read: $($customers.Count)"
-    Write-Host "91-day transactions read: $($transactions.Count)"
-    $batchSize = if ($config.batchSize) { [int]$config.batchSize } else { 250 }
-
-    for ($i = 0; $i -lt $customers.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $customers.Count - 1)
-      $batch = @($customers[$i..$end])
-      $result = Invoke-BridgePost @{ customers = $batch; transactions = @() }
-      Write-Host "Customer batch $($i + 1)-$($end + 1): staged $($result.customers_staged)"
-    }
-
-    for ($i = 0; $i -lt $transactions.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $transactions.Count - 1)
-      $batch = @($transactions[$i..$end])
-      $result = Invoke-BridgePost @{ customers = @(); transactions = $batch }
-      Write-Host "Transaction batch $($i + 1)-$($end + 1): staged $($result.transactions_staged), resolved $($result.transactions_resolved)"
-    }
-    Write-Host "Snapshot upload complete." -ForegroundColor Green
-  }
-}
-, ' ').Trim()
+  $normalized = ($Query -replace '(?s)/\*.*?\*/', ' ')
+  $normalized = ($normalized -replace '(?m)--.*$', ' ').Trim()
   if ($normalized -notmatch '^(?is)(SELECT|WITH)\b') {
     throw "RMS bridge rejected a non-read SQL command."
   }
@@ -942,483 +93,13 @@ function Resolve-SafeTableName([string]$RequestedTable) {
   return "[" + $schema.Replace("]", "]]") + "].[" + $table.Replace("]", "]]") + "]"
 }
 
-function Invoke-BridgePost([hashtable]$Body) {
-  $headers = @{ "x-admin-key" = $config.apiKey }
-  $json = $Body | ConvertTo-Json -Depth 8 -Compress
-  $uri = "$($config.apiBaseUrl.TrimEnd('/'))/admin/migration/rms-snapshot"
-  return Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType "application/json" -Body $json
-}
-
-$customerQuery = @"
-SELECT
-    C.ID                 AS RMSCustomerID,
-    C.AccountNumber,
-    C.Employee,
-    C.FirstName,
-    C.LastName,
-    C.Company,
-    C.EmailAddress,
-    C.PhoneNumber,
-    C.FaxNumber,
-    C.Address,
-    C.Address2,
-    C.City,
-    C.State,
-    C.Zip,
-    C.Country,
-    C.TaxNumber,
-    C.TaxExempt,
-    C.AccountBalance,
-    C.TotalSales,
-    C.AccountOpened,
-    C.LastVisit,
-    C.TotalVisits,
-    C.TotalSavings,
-    C.CurrentDiscount    AS LegacyDiscount,
-    C.Vouchers,
-    C.LastUpdated
-FROM Customer C
-ORDER BY C.ID;
-"@
-
-$productExportQuery = @"
-SELECT
-    I.ID                                      AS RMS_ItemID,
-    I.ItemLookupCode                          AS RMS_SKU,
-    I.Description                             AS RMS_Description,
-    I.DepartmentID                            AS RMS_DepartmentID,
-    D.Name                                    AS RMS_Department,
-    D.Code                                    AS RMS_DepartmentCode,
-    I.CategoryID                              AS RMS_CategoryID,
-    C.Name                                    AS RMS_Category,
-    C.Code                                    AS RMS_CategoryCode,
-    I.SupplierID                              AS RMS_SupplierID,
-    S.SupplierName                            AS RMS_Supplier,
-    S.Code                                    AS RMS_SupplierCode,
-    PSL.ReorderNumber                         AS RMS_SupplierItemCode,
-    PSL.Cost                                  AS RMS_SupplierListCost,
-    I.Cost,
-    I.LastCost,
-    I.ReplacementCost,
-    I.Price                                   AS RetailPrice,
-    I.MSRP,
-    I.Quantity                                AS RMS_Quantity,
-    I.ReorderPoint                            AS RMS_ReorderPoint,
-    I.RestockLevel                            AS RMS_RestockLevel,
-    I.LastSold,
-    I.LastReceived,
-    I.DateCreated,
-    I.LastUpdated,
-    I.Inactive,
-    I.DoNotOrder,
-    I.ExtendedDescription,
-    PAM.WebDescription                       AS RMS_WebDescription,
-    I.SubDescription1,
-    I.SubDescription2,
-    I.SubDescription3                         AS Brand,
-    I.SubDescription3,
-    I.PictureName,
-    I.Weight,
-    BAR.PrimaryBarcode                        AS RMS_UPC,
-    ALS.AllAliases                            AS RMS_Aliases
-FROM Item I
-LEFT JOIN Department D ON D.ID = I.DepartmentID
-LEFT JOIN Category C ON C.ID = I.CategoryID
-LEFT JOIN Supplier S ON S.ID = I.SupplierID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.HQID
-OUTER APPLY (
-    SELECT TOP 1
-        SL.ReorderNumber,
-        SL.Cost
-    FROM SupplierList SL
-    WHERE SL.ItemID = I.ID
-      AND SL.SupplierID = I.SupplierID
-    ORDER BY SL.ID
-) PSL
-OUTER APPLY (
-    SELECT TOP 1 A.Alias AS PrimaryBarcode
-    FROM Alias A
-    WHERE A.ItemID = I.ID
-      AND A.Alias IS NOT NULL
-      AND LTRIM(RTRIM(A.Alias)) <> ''
-      AND A.Alias NOT LIKE '%[^0-9]%'
-      AND LEN(LTRIM(RTRIM(A.Alias))) IN (8, 12, 13, 14)
-    ORDER BY
-      CASE LEN(LTRIM(RTRIM(A.Alias)))
-        WHEN 12 THEN 1
-        WHEN 13 THEN 2
-        WHEN 14 THEN 3
-        WHEN 8 THEN 4
-        ELSE 9
-      END,
-      A.ID
-) BAR
-OUTER APPLY (
-    SELECT STUFF((
-        SELECT '|' + REPLACE(LTRIM(RTRIM(A2.Alias)), '|', '')
-        FROM Alias A2
-        WHERE A2.ItemID = I.ID
-          AND A2.Alias IS NOT NULL
-          AND LTRIM(RTRIM(A2.Alias)) <> ''
-        ORDER BY A2.ID
-        FOR XML PATH(''), TYPE
-    ).value('.', 'nvarchar(max)'), 1, 1, '') AS AllAliases
-) ALS
-ORDER BY I.ID;
-"@
-
-$transactionQuery = @"
-SELECT
-    T.CustomerID                                  AS RMSCustomerID,
-    T.StoreID,
-    T.BatchNumber,
-    T.TransactionNumber,
-    T.Time                                        AS SaleDate,
-    CAST(T.Total AS decimal(14,2))                 AS GrossTotal,
-    CAST(ISNULL(T.SalesTax, 0) AS decimal(14,2))  AS SalesTax,
-    CAST(T.Total - ISNULL(T.SalesTax, 0) AS decimal(14,2)) AS PretaxAmount
-FROM PUBLIC_Transaction T
-JOIN Customer C ON C.ID = T.CustomerID
-WHERE
-    T.CustomerID IS NOT NULL
-    AND T.CustomerID <> 0
-    AND T.Time >= DATEADD(day, -91, GETDATE())
-    AND T.Time <= GETDATE()
-    AND ISNULL(C.Employee, 0) <> 1
-ORDER BY
-    T.CustomerID,
-    T.Time,
-    T.TransactionNumber;
-"@
-
-switch ($Action) {
-  "test" {
-    $row = Invoke-SqlRows "SELECT DB_NAME() AS DatabaseName, @@SERVERNAME AS ServerName, @@VERSION AS SqlVersion;"
-    Write-Host "SQL connection succeeded." -ForegroundColor Green
-    $row | Format-List
-    $health = Invoke-RestMethod -Method Get -Uri "$($config.apiBaseUrl.TrimEnd('/'))/health"
-    Write-Host "Railway API connection succeeded." -ForegroundColor Green
-    $health | Format-List
+function Get-SafeDatabaseName([string]$Source) {
+  $dbName = if ($Source -eq "hq") {
+    if ($config.hqDatabase) { [string]$config.hqDatabase } else { "HQcorp" }
+  } else {
+    [string]$config.database
   }
-
-  "schema" {
-    $q = @"
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME IN ('Customer','PUBLIC_Transaction')
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    Invoke-SqlRows $q | Format-Table -AutoSize
-  }
-
-  "product-schema" {
-    $q = @"
-SELECT
-    TABLE_NAME,
-    COLUMN_NAME,
-    DATA_TYPE,
-    CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE
-    TABLE_NAME LIKE '%Item%'
-    OR TABLE_NAME LIKE '%Product%'
-    OR TABLE_NAME LIKE '%Inventory%'
-    OR TABLE_NAME LIKE '%Supplier%'
-    OR TABLE_NAME LIKE '%Department%'
-    OR TABLE_NAME LIKE '%Category%'
-    OR TABLE_NAME LIKE '%Purchase%'
-    OR TABLE_NAME LIKE '%Transaction%'
-    OR COLUMN_NAME LIKE '%Reorder%'
-    OR COLUMN_NAME LIKE '%Restock%'
-    OR COLUMN_NAME LIKE '%Quantity%'
-    OR COLUMN_NAME LIKE '%Qty%'
-    OR COLUMN_NAME LIKE '%OnHand%'
-    OR COLUMN_NAME LIKE '%OnOrder%'
-    OR COLUMN_NAME LIKE '%Supplier%'
-    OR COLUMN_NAME LIKE '%Department%'
-    OR COLUMN_NAME LIKE '%Category%'
-    OR COLUMN_NAME LIKE '%Discontinued%'
-    OR COLUMN_NAME LIKE '%Inactive%'
-    OR COLUMN_NAME LIKE '%LastSold%'
-    OR COLUMN_NAME LIKE '%LastSale%'
-    OR COLUMN_NAME LIKE '%LastReceived%'
-    OR COLUMN_NAME LIKE '%LastPurchase%'
-    OR COLUMN_NAME LIKE '%Cost%'
-    OR COLUMN_NAME LIKE '%Price%'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    $rows = @(Invoke-SqlRows $q)
-    Write-Host "Product/inventory schema candidates: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-schema" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.NUMERIC_PRECISION,
-    C.NUMERIC_SCALE,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Database schema rows: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-tables" {
-    $q = @"
-SELECT
-    TABLE_SCHEMA,
-    TABLE_NAME,
-    TABLE_TYPE
-FROM INFORMATION_SCHEMA.TABLES
-ORDER BY TABLE_SCHEMA,TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-access" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    CAST(HAS_PERMS_BY_NAME(
-        QUOTENAME(T.TABLE_SCHEMA) + '.' + QUOTENAME(T.TABLE_NAME),
-        'OBJECT',
-        'SELECT'
-    ) AS int) AS CanSelect
-FROM INFORMATION_SCHEMA.TABLES T
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    $readable=@($rows | Where-Object { [int]$_.CanSelect -eq 1 })
-    $blocked=@($rows | Where-Object { [int]$_.CanSelect -ne 1 })
-    Write-Host "Visible tables/views: $($rows.Count)" -ForegroundColor Green
-    Write-Host "Readable with current SQL login: $($readable.Count)" -ForegroundColor Green
-    Write-Host "Not readable with current SQL login: $($blocked.Count)" -ForegroundColor $(if($blocked.Count -eq 0){"Green"}else{"Yellow"})
-    $rows | Format-Table -AutoSize
-  }
-
-
-  "migration-discovery" {
-    $targets = @(
-      "NitroSell_ProductNavigation",
-      "nitrosell_productphotos",
-      "NitroSell_WebCategory",
-      "NitroSell_WebDepartment",
-      "NitroSell_WebProductNavigation",
-      "WebLinK_item",
-      "WebLinK_itemdynamic",
-      "WebLinK_nitrosellpicturedetails",
-      "WebLinK_productimages",
-      "WebLinK_productnavigation",
-      "WebLinK_category",
-      "Voucher",
-      "VoucherEntry",
-      "VoucherFormatNumber",
-      "AccountReceivable",
-      "AccountReceivableHistory",
-      "ARHistoryMirror",
-      "Transaction",
-      "TransactionEntry",
-      "PUBLIC_Transaction",
-      "PUBLIC_TransactionEntry",
-      "PurchaseOrder",
-      "PurchaseOrderEntry",
-      "PurchaseOrderEntryDetail"
-    )
-
-    foreach ($target in $targets) {
-      Write-Host ""
-      Write-Host ("=" * 88) -ForegroundColor DarkGray
-      Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
-
-      $escaped = $target.Replace("'", "''")
-      $meta = @(Invoke-SqlRows @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-WHERE T.TABLE_NAME='$escaped'
-ORDER BY C.ORDINAL_POSITION;
-"@)
-
-      if ($meta.Count -eq 0) {
-        Write-Host "Not present." -ForegroundColor Yellow
-        continue
-      }
-
-      $meta | Format-Table -AutoSize
-
-      $safe = Resolve-SafeTableName $target
-      $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
-      Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
-
-      Write-Host "Sample rows (TOP 5):" -ForegroundColor DarkCyan
-      try {
-        @(Invoke-SqlRows "SELECT TOP 5 * FROM $safe;") | Format-List
-      } catch {
-        Write-Host "Sample read failed: $($_.Exception.Message)" -ForegroundColor Yellow
-      }
-    }
-  }
-
-
-  "product-web-diagnostic" {
-    $q = @"
-SELECT TOP 100
-    I.ID AS StoreItemID,
-    I.HQID AS HQItemID,
-    I.ItemLookupCode,
-    I.Description,
-    I.ExtendedDescription,
-    I.Content,
-    I.PictureName,
-    LPAM.WebDescription AS LocalPAM_WebDescription,
-    WRONGPAM.WebDescription AS HQPAM_ByStoreItemID,
-    HPAM.WebDescription AS HQPAM_ByHQID
-FROM Item I
-LEFT JOIN dbo.nitroasl_pamtable LPAM
-  ON LPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable WRONGPAM
-  ON WRONGPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable HPAM
-  ON HPAM.ItemID = I.HQID
-WHERE I.ItemLookupCode IN (
-    'GW48-111','WZK96383','DOW7201','TES1133TT','TES1162TT','BSI-117',
-    'ULP81126','ULP81156','TES1103TT','TES1104TT','TES1108TT',
-    'TES1110TT','TES1111TT','TES1112TT'
-)
-ORDER BY I.ItemLookupCode;
-"@
-    try {
-      $rows = @(Invoke-SqlRows $q)
-      Write-Host "Web-description diagnostic rows: $($rows.Count)" -ForegroundColor Green
-      $rows | Format-List
-    } catch {
-      Write-Host "PAM web-description diagnostic failed; showing PAM schemas instead." -ForegroundColor Yellow
-      foreach ($target in @("nitroasl_pamtable")) {
-        Write-Host ""
-        Write-Host "LOCAL SCHEMA: $target" -ForegroundColor Cyan
-        $escaped = $target.Replace("'", "''")
-        @(Invoke-SqlRows @"
-SELECT ORDINAL_POSITION,COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME='$escaped'
-ORDER BY ORDINAL_POSITION;
-"@) | Format-Table -AutoSize
-      }
-      throw
-    }
-  }
-
-  "database-relations" {
-    $q = @"
-SELECT
-    fk.name AS ForeignKeyName,
-    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
-    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
-    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
-    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
-    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
-    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
-FROM sys.foreign_keys fk
-JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
-ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Foreign-key relationships found: $($rows.Count)" -ForegroundColor Green
-    if ($rows.Count -eq 0) { Write-Host "No declared foreign keys were found. RMS may rely on implicit relationships." }
-    else { $rows | Format-Table -AutoSize }
-  }
-
-  "table-count" {
-    $safeTable=Resolve-SafeTableName $TableName
-    $rows=Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safeTable;"
-    Write-Host "Table: $TableName" -ForegroundColor Green
-    $rows | Format-List
-  }
-
-  "table-preview" {
-    if ($PreviewRows -lt 1) { $PreviewRows=25 }
-    if ($PreviewRows -gt 100) { $PreviewRows=100 }
-    $safeTable=Resolve-SafeTableName $TableName
-    Write-Host "Previewing TOP $PreviewRows rows from $TableName" -ForegroundColor Green
-    Invoke-SqlRows "SELECT TOP $PreviewRows * FROM $safeTable;" | Format-Table -AutoSize
-  }
-
-  "product-export" {
-    $exportDir = Split-Path -Parent $ProductExportPath
-    if (-not (Test-Path $exportDir)) {
-      New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
-    }
-
-    Write-Host "Reading enriched RMS product catalog..." -ForegroundColor Cyan
-    $rows = @(Invoke-SqlRows $productExportQuery)
-    Write-Host "Products read: $($rows.Count)" -ForegroundColor Green
-
-    $rows | Export-Csv -Path $ProductExportPath -NoTypeInformation -Encoding UTF8
-    $file = Get-Item $ProductExportPath
-    Write-Host "Product export complete." -ForegroundColor Green
-    Write-Host "Path: $($file.FullName)"
-    Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
-    Write-Host "Brand source: Item.SubDescription3"
-    Write-Host "UPC/aliases source: Alias"
-    Write-Host "Supplier item code source: SupplierList.ReorderNumber"
-    Write-Host "Supplier code source: Supplier.Code"
-    Write-Host "Web description source: HQcorp.dbo.nitroasl_pamtable.WebDescription joined on Item.HQID"
-  }
-
-  "customers-preview" {
-    $previewQuery = $customerQuery.Replace("SELECT`n    C.ID", "SELECT TOP 10`n    C.ID")
-    Invoke-SqlRows $previewQuery | Format-Table -AutoSize
-  }
-
-  "snapshot" {
-    $customers = @(Invoke-SqlRows $customerQuery)
-    $transactions = @(Invoke-SqlRows $transactionQuery)
-    Write-Host "Customers read: $($customers.Count)"
-    Write-Host "91-day transactions read: $($transactions.Count)"
-    $batchSize = if ($config.batchSize) { [int]$config.batchSize } else { 250 }
-
-    for ($i = 0; $i -lt $customers.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $customers.Count - 1)
-      $batch = @($customers[$i..$end])
-      $result = Invoke-BridgePost @{ customers = $batch; transactions = @() }
-      Write-Host "Customer batch $($i + 1)-$($end + 1): staged $($result.customers_staged)"
-    }
-
-    for ($i = 0; $i -lt $transactions.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $transactions.Count - 1)
-      $batch = @($transactions[$i..$end])
-      $result = Invoke-BridgePost @{ customers = @(); transactions = $batch }
-      Write-Host "Transaction batch $($i + 1)-$($end + 1): staged $($result.transactions_staged), resolved $($result.transactions_resolved)"
-    }
-    Write-Host "Snapshot upload complete." -ForegroundColor Green
-  }
-}
-) {
+  if ([string]::IsNullOrWhiteSpace($dbName) -or $dbName -notmatch '^[A-Za-z0-9_$#@ .-]+$') {
     throw "Unsafe or missing configured database name for source '$Source'."
   }
   return $dbName
@@ -1601,177 +282,104 @@ function Get-ReadQuery([string]$Name) {
 
   switch ($normalized) {
     "receipts" {
-      Test-RequiredColumns @{
-        "PUBLIC_Transaction" = @("StoreID","BatchNumber","TransactionNumber","Time","CustomerID","Total","SalesTax")
-      }
-      if (-not [string]::IsNullOrWhiteSpace($CustomerID)) {
-        $where += "T.CustomerID = @CustomerID"
-        $params["CustomerID"] = $CustomerID
-      }
+      Test-RequiredColumns @{ "PUBLIC_Transaction"=@("StoreID","BatchNumber","TransactionNumber","Time","CustomerID","Total","SalesTax") }
+      if (-not [string]::IsNullOrWhiteSpace($CustomerID)) { $where += "T.CustomerID=@CustomerID"; $params["CustomerID"]=$CustomerID }
       $predicate = if ($where.Count) { "WHERE " + ($where -join " AND ") } else { "" }
-      return @{
-        Parameters = $params
-        Sql = @"
+      return @{ Parameters=$params; Sql=@"
 SELECT TOP $top
-    T.StoreID,
-    T.BatchNumber,
-    T.TransactionNumber,
-    T.Time AS SaleDate,
-    T.CustomerID,
-    CAST(T.Total AS decimal(14,2)) AS GrossTotal,
-    CAST(ISNULL(T.SalesTax,0) AS decimal(14,2)) AS SalesTax,
-    CAST(T.Total-ISNULL(T.SalesTax,0) AS decimal(14,2)) AS PretaxAmount
+ T.StoreID,T.BatchNumber,T.TransactionNumber,T.Time AS SaleDate,T.CustomerID,
+ CAST(T.Total AS decimal(14,2)) AS GrossTotal,
+ CAST(ISNULL(T.SalesTax,0) AS decimal(14,2)) AS SalesTax,
+ CAST(T.Total-ISNULL(T.SalesTax,0) AS decimal(14,2)) AS PretaxAmount
 FROM PUBLIC_Transaction T
 $predicate
 ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber;
-"@
-      }
+"@ }
     }
     "sales-by-item" {
       Test-RequiredColumns @{
-        "PUBLIC_Transaction" = @("StoreID","TransactionNumber","Time","CustomerID")
-        "PUBLIC_TransactionEntry" = @("StoreID","TransactionNumber","ItemID","Quantity","Price")
-        "Item" = @("ID","ItemLookupCode","Description")
+        "PUBLIC_Transaction"=@("StoreID","TransactionNumber","Time","CustomerID")
+        "PUBLIC_TransactionEntry"=@("StoreID","TransactionNumber","ItemID","Quantity","Price")
+        "Item"=@("ID","ItemLookupCode","Description")
       }
-      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) {
-        $where += "I.ItemLookupCode = @Sku"
-        $params["Sku"] = $ItemLookupCode.Trim()
-      }
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $where += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
       $predicate = if ($where.Count) { "WHERE " + ($where -join " AND ") } else { "" }
-      return @{
-        Parameters = $params
-        Sql = @"
+      return @{ Parameters=$params; Sql=@"
 SELECT TOP $top
-    T.StoreID,
-    T.TransactionNumber,
-    T.Time AS SaleDate,
-    T.CustomerID,
-    E.ItemID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    E.Quantity,
-    CAST(E.Price AS decimal(14,2)) AS UnitPrice
+ T.StoreID,T.TransactionNumber,T.Time AS SaleDate,T.CustomerID,
+ E.ItemID AS RMS_ItemID,I.ItemLookupCode AS RMS_SKU,I.Description AS RMS_Description,
+ E.Quantity,CAST(E.Price AS decimal(14,2)) AS UnitPrice
 FROM PUBLIC_TransactionEntry E
-JOIN PUBLIC_Transaction T
-  ON T.StoreID=E.StoreID AND T.TransactionNumber=E.TransactionNumber
+JOIN PUBLIC_Transaction T ON T.StoreID=E.StoreID AND T.TransactionNumber=E.TransactionNumber
 LEFT JOIN Item I ON I.ID=E.ItemID
 $predicate
 ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber,E.ItemID;
-"@
-      }
+"@ }
     }
     "supplier-items" {
       Test-RequiredColumns @{
-        "Supplier" = @("ID","SupplierName","Code")
-        "SupplierList" = @("ID","ItemID","SupplierID","ReorderNumber","Cost")
-        "Item" = @("ID","ItemLookupCode","Description","SupplierID")
+        "Supplier"=@("ID","SupplierName","Code")
+        "SupplierList"=@("ID","ItemID","SupplierID","ReorderNumber","Cost")
+        "Item"=@("ID","ItemLookupCode","Description","SupplierID")
       }
-      $supplierWhere = ""
-      if (-not [string]::IsNullOrWhiteSpace($SupplierID)) {
-        $supplierWhere = "WHERE SL.SupplierID = @SupplierID"
-        $params["SupplierID"] = $SupplierID
-      }
-      return @{
-        Parameters = $params
-        Sql = @"
+      $supplierWhere=""
+      if (-not [string]::IsNullOrWhiteSpace($SupplierID)) { $supplierWhere="WHERE SL.SupplierID=@SupplierID"; $params["SupplierID"]=$SupplierID }
+      return @{ Parameters=$params; Sql=@"
 SELECT TOP $top
-    SL.SupplierID AS RMS_SupplierID,
-    S.SupplierName AS RMS_Supplier,
-    S.Code AS RMS_SupplierCode,
-    SL.ItemID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    SL.ReorderNumber AS RMS_SupplierItemCode,
-    CAST(SL.Cost AS decimal(14,2)) AS SupplierListCost,
-    CASE WHEN I.SupplierID=SL.SupplierID THEN 1 ELSE 0 END AS IsPrimarySupplier
+ SL.SupplierID AS RMS_SupplierID,S.SupplierName AS RMS_Supplier,S.Code AS RMS_SupplierCode,
+ SL.ItemID AS RMS_ItemID,I.ItemLookupCode AS RMS_SKU,I.Description AS RMS_Description,
+ SL.ReorderNumber AS RMS_SupplierItemCode,CAST(SL.Cost AS decimal(14,2)) AS SupplierListCost,
+ CASE WHEN I.SupplierID=SL.SupplierID THEN 1 ELSE 0 END AS IsPrimarySupplier
 FROM SupplierList SL
 LEFT JOIN Supplier S ON S.ID=SL.SupplierID
 LEFT JOIN Item I ON I.ID=SL.ItemID
 $supplierWhere
 ORDER BY S.SupplierName,I.ItemLookupCode,SL.ID;
-"@
-      }
+"@ }
     }
     "item-pricing" {
-      Test-RequiredColumns @{
-        "Item" = @("ID","ItemLookupCode","Description","Cost","LastCost","ReplacementCost","Price","MSRP","LastUpdated")
-      }
-      $itemWhere = ""
-      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) {
-        $itemWhere = "WHERE I.ItemLookupCode = @Sku"
-        $params["Sku"] = $ItemLookupCode.Trim()
-      }
-      return @{
-        Parameters = $params
-        Sql = @"
+      Test-RequiredColumns @{ "Item"=@("ID","ItemLookupCode","Description","Cost","LastCost","ReplacementCost","Price","MSRP","LastUpdated") }
+      $itemWhere=""
+      if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $itemWhere="WHERE I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      return @{ Parameters=$params; Sql=@"
 SELECT TOP $top
-    I.ID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    CAST(I.Cost AS decimal(14,2)) AS Cost,
-    CAST(I.LastCost AS decimal(14,2)) AS LastCost,
-    CAST(I.ReplacementCost AS decimal(14,2)) AS ReplacementCost,
-    CAST(I.Price AS decimal(14,2)) AS RetailPrice,
-    CAST(I.MSRP AS decimal(14,2)) AS MSRP,
-    I.LastUpdated
+ I.ID AS RMS_ItemID,I.ItemLookupCode AS RMS_SKU,I.Description AS RMS_Description,
+ CAST(I.Cost AS decimal(14,2)) AS Cost,CAST(I.LastCost AS decimal(14,2)) AS LastCost,
+ CAST(I.ReplacementCost AS decimal(14,2)) AS ReplacementCost,CAST(I.Price AS decimal(14,2)) AS RetailPrice,
+ CAST(I.MSRP AS decimal(14,2)) AS MSRP,I.LastUpdated
 FROM Item I
 $itemWhere
 ORDER BY I.LastUpdated DESC,I.ID;
-"@
-      }
+"@ }
     }
     "classifications" {
       Test-RequiredColumns @{
-        "Item" = @("ID","ItemLookupCode","Description","DepartmentID","CategoryID")
-        "Department" = @("ID","Name","Code")
-        "Category" = @("ID","Name","Code")
+        "Item"=@("ID","ItemLookupCode","Description","DepartmentID","CategoryID")
+        "Department"=@("ID","Name","Code")
+        "Category"=@("ID","Name","Code")
       }
-      return @{
-        Parameters = @{}
-        Sql = @"
+      return @{ Parameters=@{}; Sql=@"
 SELECT TOP $top
-    I.ID AS RMS_ItemID,
-    I.ItemLookupCode AS RMS_SKU,
-    I.Description AS RMS_Description,
-    D.ID AS RMS_DepartmentID,
-    D.Name AS RMS_Department,
-    D.Code AS RMS_DepartmentCode,
-    C.ID AS RMS_CategoryID,
-    C.Name AS RMS_Category,
-    C.Code AS RMS_CategoryCode
+ I.ID AS RMS_ItemID,I.ItemLookupCode AS RMS_SKU,I.Description AS RMS_Description,
+ D.ID AS RMS_DepartmentID,D.Name AS RMS_Department,D.Code AS RMS_DepartmentCode,
+ C.ID AS RMS_CategoryID,C.Name AS RMS_Category,C.Code AS RMS_CategoryCode
 FROM Item I
 LEFT JOIN Department D ON D.ID=I.DepartmentID
 LEFT JOIN Category C ON C.ID=I.CategoryID
 ORDER BY D.Name,C.Name,I.ItemLookupCode;
-"@
-      }
+"@ }
     }
     "customers" {
-      Test-RequiredColumns @{
-        "Customer" = @("ID","AccountNumber","FirstName","LastName","Company","EmailAddress","PhoneNumber","AccountOpened","LastVisit","TotalVisits","TotalSales","LastUpdated")
-      }
-      return @{
-        Parameters = @{}
-        Sql = @"
+      Test-RequiredColumns @{ "Customer"=@("ID","AccountNumber","FirstName","LastName","Company","EmailAddress","PhoneNumber","AccountOpened","LastVisit","TotalVisits","TotalSales","LastUpdated") }
+      return @{ Parameters=@{}; Sql=@"
 SELECT TOP $top
-    C.ID AS RMSCustomerID,
-    C.AccountNumber,
-    C.FirstName,
-    C.LastName,
-    C.Company,
-    C.EmailAddress,
-    C.PhoneNumber,
-    C.AccountOpened,
-    C.LastVisit,
-    C.TotalVisits,
-    C.TotalSales,
-    C.LastUpdated
+ C.ID AS RMSCustomerID,C.AccountNumber,C.FirstName,C.LastName,C.Company,C.EmailAddress,C.PhoneNumber,
+ C.AccountOpened,C.LastVisit,C.TotalVisits,C.TotalSales,C.LastUpdated
 FROM Customer C
 ORDER BY C.LastUpdated DESC,C.ID;
-"@
-      }
+"@ }
     }
-    default { throw "Unknown read query '$Name'. Use -Action read-catalog for the allowed presets." }
+    default { throw "Unknown read query '$Name'. Use -Action read-catalog for allowed presets." }
   }
 }
 
@@ -1921,43 +529,79 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
   }
 
 
+  "source-tables" {
+    $dbName=Get-SafeDatabaseName $DataSource
+    $escapedDb=$dbName.Replace("]", "]]")
+    $rows=@(Invoke-SqlRows @"
+SELECT TABLE_SCHEMA,TABLE_NAME,TABLE_TYPE
+FROM [$escapedDb].INFORMATION_SCHEMA.TABLES
+ORDER BY TABLE_SCHEMA,TABLE_NAME;
+"@)
+    Write-Host "$DataSource database: $dbName" -ForegroundColor Green
+    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
+  }
+
+  "source-schema" {
+    $dbName=Get-SafeDatabaseName $DataSource
+    $escapedDb=$dbName.Replace("]", "]]")
+    $escapedName=$TableName.Replace("'", "''")
+    $where=if([string]::IsNullOrWhiteSpace($TableName)){""}else{"WHERE T.TABLE_NAME='$escapedName'"}
+    $rows=@(Invoke-SqlRows @"
+SELECT T.TABLE_SCHEMA,T.TABLE_NAME,T.TABLE_TYPE,C.ORDINAL_POSITION,C.COLUMN_NAME,C.DATA_TYPE,
+ C.CHARACTER_MAXIMUM_LENGTH,C.NUMERIC_PRECISION,C.NUMERIC_SCALE,C.IS_NULLABLE
+FROM [$escapedDb].INFORMATION_SCHEMA.TABLES T
+LEFT JOIN [$escapedDb].INFORMATION_SCHEMA.COLUMNS C
+ ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
+$where
+ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
+"@)
+    Write-Host "$DataSource database schema rows: $($rows.Count)" -ForegroundColor Green
+    $rows | Format-Table -AutoSize
+  }
+
+  "table-read" {
+    $top=[Math]::Max(1,[Math]::Min([int]$Limit,2000))
+    $safeTable=Resolve-SafeSourceTable $DataSource $TableName
+    Write-Host "Reading TOP $top from $DataSource::$TableName" -ForegroundColor Green
+    Invoke-SqlRows "SELECT TOP $top * FROM $safeTable;" | Format-Table -AutoSize
+  }
+
   "safety-test" {
     Assert-ReadOnlySql "SELECT 1 AS SafeRead;"
-    $blocked = $false
-    try { Assert-ReadOnlySql "UPDATE Item SET Price=0;" } catch { $blocked = $true }
-    if (-not $blocked) { throw "Read-only SQL guard failed to block UPDATE." }
-    $blockedInto = $false
-    try { Assert-ReadOnlySql "SELECT * INTO UnsafeCopy FROM Item;" } catch { $blockedInto = $true }
-    if (-not $blockedInto) { throw "Read-only SQL guard failed to block SELECT INTO." }
+    $blocked=$false
+    try { Assert-ReadOnlySql "UPDATE Item SET Price=0;" } catch { $blocked=$true }
+    if(-not $blocked){throw "Read-only SQL guard failed to block UPDATE."}
+    $blockedInto=$false
+    try { Assert-ReadOnlySql "SELECT * INTO UnsafeCopy FROM Item;" } catch { $blockedInto=$true }
+    if(-not $blockedInto){throw "Read-only SQL guard failed to block SELECT INTO."}
     Write-Host "Read-only SQL safety guard passed." -ForegroundColor Green
   }
 
   "read-catalog" {
     @(
-      [pscustomobject]@{ QueryName="receipts"; Purpose="Sales receipt headers / customer purchase history"; Source="PUBLIC_Transaction"; Status="Ready - existing bridge columns" },
-      [pscustomobject]@{ QueryName="sales-by-item"; Purpose="Historical item/SKU sales lines by date"; Source="PUBLIC_Transaction + PUBLIC_TransactionEntry + Item"; Status="Schema-checked at runtime" },
-      [pscustomobject]@{ QueryName="supplier-items"; Purpose="Supplier-to-item relationships, reorder numbers and costs"; Source="Supplier + SupplierList + Item"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="item-pricing"; Purpose="Current RMS cost/retail fields and last-updated timestamp"; Source="Item"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="classifications"; Purpose="Current department/category assignment by item"; Source="Item + Department + Category"; Status="Ready - existing product export columns" },
-      [pscustomobject]@{ QueryName="customers"; Purpose="Customer master / visit and sales summary fields"; Source="Customer"; Status="Ready - existing migration columns" }
+      [pscustomobject]@{QueryName="receipts";Purpose="Receipt headers/customer purchase history";Source="PUBLIC_Transaction"},
+      [pscustomobject]@{QueryName="sales-by-item";Purpose="Historical item/SKU sales lines";Source="PUBLIC_TransactionEntry + PUBLIC_Transaction + Item"},
+      [pscustomobject]@{QueryName="supplier-items";Purpose="Supplier-item relationships/reorder numbers/costs";Source="SupplierList + Supplier + Item"},
+      [pscustomobject]@{QueryName="item-pricing";Purpose="Current RMS cost/retail snapshot";Source="Item"},
+      [pscustomobject]@{QueryName="classifications";Purpose="Current department/category assignment";Source="Item + Department + Category"},
+      [pscustomobject]@{QueryName="customers";Purpose="Customer master/visit/sales summary";Source="Customer"}
     ) | Format-Table -AutoSize
-    Write-Host ""
-    Write-Host "Purchase-order, inventory-movement, pricing-history and legacy web/HQ history tables are discovery targets until their live columns are confirmed." -ForegroundColor Yellow
   }
 
   "read-query" {
-    if ([string]::IsNullOrWhiteSpace($QueryName)) { throw "QueryName is required for read-query." }
-    $spec = Get-ReadQuery $QueryName
-    $rows = @(Invoke-SqlRows $spec.Sql $spec.Parameters)
-    Write-Host "Read preset '$QueryName' returned $($rows.Count) row(s). Limit: $([Math]::Max(1,[Math]::Min([int]$Limit,2000)))" -ForegroundColor Green
+    if([string]::IsNullOrWhiteSpace($QueryName)){throw "QueryName is required for read-query."}
+    $spec=Get-ReadQuery $QueryName
+    $rows=@(Invoke-SqlRows $spec.Sql $spec.Parameters)
+    Write-Host "Read preset '$QueryName' returned $($rows.Count) row(s)." -ForegroundColor Green
     $rows | Format-Table -AutoSize
   }
 
   "operational-discovery" {
-    $targets = @(
+    $targets=@(
       "PUBLIC_Transaction","PUBLIC_TransactionEntry","Transaction","TransactionEntry",
-      "Item","ItemDynamic","Alias","Department","Category",
-      "Supplier","SupplierList","PurchaseOrder","PurchaseOrderEntry","PurchaseOrderEntryDetail",
+      "Item","ItemDynamic","Alias","Department","Category","Supplier","SupplierList",
+      "PurchaseOrder","PurchaseOrderEntry","PurchaseOrderEntryDetail",
       "InventoryTransfer","InventoryTransferEntry","InventoryTransferLog","InventoryMovement","ItemMovement",
       "Customer","AccountReceivable","AccountReceivableHistory","ARHistoryMirror",
       "Voucher","VoucherEntry","VoucherFormatNumber",
@@ -1965,575 +609,40 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
       "NitroSell_WebProductNavigation","WebLinK_item","WebLinK_itemdynamic","WebLinK_productimages",
       "WebLinK_productnavigation","WebLinK_category","nitroasl_pamtable"
     )
-    foreach ($target in $targets) {
-      $escaped = $target.Replace("'","''")
-      $meta = @(Invoke-SqlRows @"
+    foreach($target in $targets){
+      $escaped=$target.Replace("'","''")
+      $meta=@(Invoke-SqlRows @"
 SELECT T.TABLE_SCHEMA,T.TABLE_NAME,T.TABLE_TYPE,C.ORDINAL_POSITION,C.COLUMN_NAME,C.DATA_TYPE
 FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
+LEFT JOIN INFORMATION_SCHEMA.COLUMNS C ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
 WHERE T.TABLE_NAME='$escaped'
 ORDER BY C.ORDINAL_POSITION;
 "@)
-      if ($meta.Count -eq 0) { continue }
+      if($meta.Count -eq 0){continue}
       Write-Host ""
-      Write-Host ("=" * 88) -ForegroundColor DarkGray
+      Write-Host ("="*88) -ForegroundColor DarkGray
       Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
       $meta | Format-Table -AutoSize
-      try {
-        $safe = Resolve-SafeTableName $target
-        $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
+      try{
+        $safe=Resolve-SafeTableName $target
+        $count=@(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
         Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
-      } catch {
-        Write-Host "Count failed: $($_.Exception.Message)" -ForegroundColor Yellow
-      }
+      }catch{Write-Host "Count failed: $($_.Exception.Message)" -ForegroundColor Yellow}
     }
-
     Write-Host ""
     Write-Host "Declared foreign keys:" -ForegroundColor Cyan
     @(Invoke-SqlRows @"
-SELECT
-    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
-    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
-    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
-    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
-    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
-    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
+SELECT OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
+ OBJECT_NAME(fk.parent_object_id) AS ChildTable,
+ COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
+ OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
+ OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
+ COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
 FROM sys.foreign_keys fk
 JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
 ORDER BY ChildSchema,ChildTable,fkc.constraint_column_id;
 "@) | Format-Table -AutoSize
   }
-
-  "migration-discovery" {
-    $targets = @(
-      "NitroSell_ProductNavigation",
-      "nitrosell_productphotos",
-      "NitroSell_WebCategory",
-      "NitroSell_WebDepartment",
-      "NitroSell_WebProductNavigation",
-      "WebLinK_item",
-      "WebLinK_itemdynamic",
-      "WebLinK_nitrosellpicturedetails",
-      "WebLinK_productimages",
-      "WebLinK_productnavigation",
-      "WebLinK_category",
-      "Voucher",
-      "VoucherEntry",
-      "VoucherFormatNumber",
-      "AccountReceivable",
-      "AccountReceivableHistory",
-      "ARHistoryMirror",
-      "Transaction",
-      "TransactionEntry",
-      "PUBLIC_Transaction",
-      "PUBLIC_TransactionEntry",
-      "PurchaseOrder",
-      "PurchaseOrderEntry",
-      "PurchaseOrderEntryDetail"
-    )
-
-    foreach ($target in $targets) {
-      Write-Host ""
-      Write-Host ("=" * 88) -ForegroundColor DarkGray
-      Write-Host "TABLE/VIEW: $target" -ForegroundColor Cyan
-
-      $escaped = $target.Replace("'", "''")
-      $meta = @(Invoke-SqlRows @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-WHERE T.TABLE_NAME='$escaped'
-ORDER BY C.ORDINAL_POSITION;
-"@)
-
-      if ($meta.Count -eq 0) {
-        Write-Host "Not present." -ForegroundColor Yellow
-        continue
-      }
-
-      $meta | Format-Table -AutoSize
-
-      $safe = Resolve-SafeTableName $target
-      $count = @(Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safe;")
-      Write-Host "Row count: $($count[0].RowCount)" -ForegroundColor Green
-
-      Write-Host "Sample rows (TOP 5):" -ForegroundColor DarkCyan
-      try {
-        @(Invoke-SqlRows "SELECT TOP 5 * FROM $safe;") | Format-List
-      } catch {
-        Write-Host "Sample read failed: $($_.Exception.Message)" -ForegroundColor Yellow
-      }
-    }
-  }
-
-
-  "product-web-diagnostic" {
-    $q = @"
-SELECT TOP 100
-    I.ID AS StoreItemID,
-    I.HQID AS HQItemID,
-    I.ItemLookupCode,
-    I.Description,
-    I.ExtendedDescription,
-    I.Content,
-    I.PictureName,
-    LPAM.WebDescription AS LocalPAM_WebDescription,
-    WRONGPAM.WebDescription AS HQPAM_ByStoreItemID,
-    HPAM.WebDescription AS HQPAM_ByHQID
-FROM Item I
-LEFT JOIN dbo.nitroasl_pamtable LPAM
-  ON LPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable WRONGPAM
-  ON WRONGPAM.ItemID = I.ID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable HPAM
-  ON HPAM.ItemID = I.HQID
-WHERE I.ItemLookupCode IN (
-    'GW48-111','WZK96383','DOW7201','TES1133TT','TES1162TT','BSI-117',
-    'ULP81126','ULP81156','TES1103TT','TES1104TT','TES1108TT',
-    'TES1110TT','TES1111TT','TES1112TT'
-)
-ORDER BY I.ItemLookupCode;
-"@
-    try {
-      $rows = @(Invoke-SqlRows $q)
-      Write-Host "Web-description diagnostic rows: $($rows.Count)" -ForegroundColor Green
-      $rows | Format-List
-    } catch {
-      Write-Host "PAM web-description diagnostic failed; showing PAM schemas instead." -ForegroundColor Yellow
-      foreach ($target in @("nitroasl_pamtable")) {
-        Write-Host ""
-        Write-Host "LOCAL SCHEMA: $target" -ForegroundColor Cyan
-        $escaped = $target.Replace("'", "''")
-        @(Invoke-SqlRows @"
-SELECT ORDINAL_POSITION,COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME='$escaped'
-ORDER BY ORDINAL_POSITION;
-"@) | Format-Table -AutoSize
-      }
-      throw
-    }
-  }
-
-  "database-relations" {
-    $q = @"
-SELECT
-    fk.name AS ForeignKeyName,
-    OBJECT_SCHEMA_NAME(fk.parent_object_id) AS ChildSchema,
-    OBJECT_NAME(fk.parent_object_id) AS ChildTable,
-    COL_NAME(fkc.parent_object_id,fkc.parent_column_id) AS ChildColumn,
-    OBJECT_SCHEMA_NAME(fk.referenced_object_id) AS ParentSchema,
-    OBJECT_NAME(fk.referenced_object_id) AS ParentTable,
-    COL_NAME(fkc.referenced_object_id,fkc.referenced_column_id) AS ParentColumn
-FROM sys.foreign_keys fk
-JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id=fk.object_id
-ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Foreign-key relationships found: $($rows.Count)" -ForegroundColor Green
-    if ($rows.Count -eq 0) { Write-Host "No declared foreign keys were found. RMS may rely on implicit relationships." }
-    else { $rows | Format-Table -AutoSize }
-  }
-
-  "table-count" {
-    $safeTable=Resolve-SafeTableName $TableName
-    $rows=Invoke-SqlRows "SELECT COUNT_BIG(*) AS RowCount FROM $safeTable;"
-    Write-Host "Table: $TableName" -ForegroundColor Green
-    $rows | Format-List
-  }
-
-  "table-preview" {
-    if ($PreviewRows -lt 1) { $PreviewRows=25 }
-    if ($PreviewRows -gt 100) { $PreviewRows=100 }
-    $safeTable=Resolve-SafeTableName $TableName
-    Write-Host "Previewing TOP $PreviewRows rows from $TableName" -ForegroundColor Green
-    Invoke-SqlRows "SELECT TOP $PreviewRows * FROM $safeTable;" | Format-Table -AutoSize
-  }
-
-  "product-export" {
-    $exportDir = Split-Path -Parent $ProductExportPath
-    if (-not (Test-Path $exportDir)) {
-      New-Item -ItemType Directory -Path $exportDir -Force | Out-Null
-    }
-
-    Write-Host "Reading enriched RMS product catalog..." -ForegroundColor Cyan
-    $rows = @(Invoke-SqlRows $productExportQuery)
-    Write-Host "Products read: $($rows.Count)" -ForegroundColor Green
-
-    $rows | Export-Csv -Path $ProductExportPath -NoTypeInformation -Encoding UTF8
-    $file = Get-Item $ProductExportPath
-    Write-Host "Product export complete." -ForegroundColor Green
-    Write-Host "Path: $($file.FullName)"
-    Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
-    Write-Host "Brand source: Item.SubDescription3"
-    Write-Host "UPC/aliases source: Alias"
-    Write-Host "Supplier item code source: SupplierList.ReorderNumber"
-    Write-Host "Supplier code source: Supplier.Code"
-    Write-Host "Web description source: HQcorp.dbo.nitroasl_pamtable.WebDescription joined on Item.HQID"
-  }
-
-  "customers-preview" {
-    $previewQuery = $customerQuery.Replace("SELECT`n    C.ID", "SELECT TOP 10`n    C.ID")
-    Invoke-SqlRows $previewQuery | Format-Table -AutoSize
-  }
-
-  "snapshot" {
-    $customers = @(Invoke-SqlRows $customerQuery)
-    $transactions = @(Invoke-SqlRows $transactionQuery)
-    Write-Host "Customers read: $($customers.Count)"
-    Write-Host "91-day transactions read: $($transactions.Count)"
-    $batchSize = if ($config.batchSize) { [int]$config.batchSize } else { 250 }
-
-    for ($i = 0; $i -lt $customers.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $customers.Count - 1)
-      $batch = @($customers[$i..$end])
-      $result = Invoke-BridgePost @{ customers = $batch; transactions = @() }
-      Write-Host "Customer batch $($i + 1)-$($end + 1): staged $($result.customers_staged)"
-    }
-
-    for ($i = 0; $i -lt $transactions.Count; $i += $batchSize) {
-      $end = [Math]::Min($i + $batchSize - 1, $transactions.Count - 1)
-      $batch = @($transactions[$i..$end])
-      $result = Invoke-BridgePost @{ customers = @(); transactions = $batch }
-      Write-Host "Transaction batch $($i + 1)-$($end + 1): staged $($result.transactions_staged), resolved $($result.transactions_resolved)"
-    }
-    Write-Host "Snapshot upload complete." -ForegroundColor Green
-  }
-}
-, ' ').Trim()
-  if ($normalized -notmatch '^(?is)(SELECT|WITH)\b') {
-    throw "RMS bridge rejected a non-read SQL command."
-  }
-  $forbidden = '(?is)\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|DENY|EXEC|EXECUTE|DBCC|BACKUP|RESTORE|KILL|USE)\b|\bSELECT\s+.*\bINTO\b'
-  if ($normalized -match $forbidden) {
-    throw "RMS bridge rejected SQL containing a write/admin keyword."
-  }
-}
-
-function Invoke-SqlRows([string]$Query, [hashtable]$Parameters = @{}) {
-  Assert-ReadOnlySql $Query
-  $conn = New-SqlConnection
-  try {
-    $conn.Open()
-    $cmd = $conn.CreateCommand()
-    $cmd.CommandText = $Query
-    $cmd.CommandTimeout = 60
-    foreach ($key in $Parameters.Keys) {
-      $value = $Parameters[$key]
-      if ($null -eq $value) { $value = [DBNull]::Value }
-      [void]$cmd.Parameters.AddWithValue("@$key", $value)
-    }
-    $reader = $cmd.ExecuteReader()
-    $rows = @()
-    while ($reader.Read()) {
-      $obj = [ordered]@{}
-      for ($i = 0; $i -lt $reader.FieldCount; $i++) {
-        $name = $reader.GetName($i)
-        $value = if ($reader.IsDBNull($i)) { $null } else { $reader.GetValue($i) }
-        if ($value -is [DateTime]) { $value = $value.ToString("o") }
-        $obj[$name] = $value
-      }
-      $rows += [pscustomobject]$obj
-    }
-    $reader.Close()
-    return $rows
-  } finally {
-    if ($conn.State -ne "Closed") { $conn.Close() }
-  }
-}
-
-function Resolve-SafeTableName([string]$RequestedTable) {
-  $name = [string]$RequestedTable
-  if ([string]::IsNullOrWhiteSpace($name)) { throw "TableName is required." }
-  $escaped = $name.Replace("'", "''")
-  $rows = @(Invoke-SqlRows "SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '$escaped';")
-  if ($rows.Count -eq 0) { throw "Unknown RMS table or view: $name" }
-  if ($rows.Count -gt 1) { throw "Table name is ambiguous across schemas: $name" }
-  $schema = [string]$rows[0].TABLE_SCHEMA
-  $table = [string]$rows[0].TABLE_NAME
-  return "[" + $schema.Replace("]", "]]") + "].[" + $table.Replace("]", "]]") + "]"
-}
-
-function Invoke-BridgePost([hashtable]$Body) {
-  $headers = @{ "x-admin-key" = $config.apiKey }
-  $json = $Body | ConvertTo-Json -Depth 8 -Compress
-  $uri = "$($config.apiBaseUrl.TrimEnd('/'))/admin/migration/rms-snapshot"
-  return Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType "application/json" -Body $json
-}
-
-$customerQuery = @"
-SELECT
-    C.ID                 AS RMSCustomerID,
-    C.AccountNumber,
-    C.Employee,
-    C.FirstName,
-    C.LastName,
-    C.Company,
-    C.EmailAddress,
-    C.PhoneNumber,
-    C.FaxNumber,
-    C.Address,
-    C.Address2,
-    C.City,
-    C.State,
-    C.Zip,
-    C.Country,
-    C.TaxNumber,
-    C.TaxExempt,
-    C.AccountBalance,
-    C.TotalSales,
-    C.AccountOpened,
-    C.LastVisit,
-    C.TotalVisits,
-    C.TotalSavings,
-    C.CurrentDiscount    AS LegacyDiscount,
-    C.Vouchers,
-    C.LastUpdated
-FROM Customer C
-ORDER BY C.ID;
-"@
-
-$productExportQuery = @"
-SELECT
-    I.ID                                      AS RMS_ItemID,
-    I.ItemLookupCode                          AS RMS_SKU,
-    I.Description                             AS RMS_Description,
-    I.DepartmentID                            AS RMS_DepartmentID,
-    D.Name                                    AS RMS_Department,
-    D.Code                                    AS RMS_DepartmentCode,
-    I.CategoryID                              AS RMS_CategoryID,
-    C.Name                                    AS RMS_Category,
-    C.Code                                    AS RMS_CategoryCode,
-    I.SupplierID                              AS RMS_SupplierID,
-    S.SupplierName                            AS RMS_Supplier,
-    S.Code                                    AS RMS_SupplierCode,
-    PSL.ReorderNumber                         AS RMS_SupplierItemCode,
-    PSL.Cost                                  AS RMS_SupplierListCost,
-    I.Cost,
-    I.LastCost,
-    I.ReplacementCost,
-    I.Price                                   AS RetailPrice,
-    I.MSRP,
-    I.Quantity                                AS RMS_Quantity,
-    I.ReorderPoint                            AS RMS_ReorderPoint,
-    I.RestockLevel                            AS RMS_RestockLevel,
-    I.LastSold,
-    I.LastReceived,
-    I.DateCreated,
-    I.LastUpdated,
-    I.Inactive,
-    I.DoNotOrder,
-    I.ExtendedDescription,
-    PAM.WebDescription                       AS RMS_WebDescription,
-    I.SubDescription1,
-    I.SubDescription2,
-    I.SubDescription3                         AS Brand,
-    I.SubDescription3,
-    I.PictureName,
-    I.Weight,
-    BAR.PrimaryBarcode                        AS RMS_UPC,
-    ALS.AllAliases                            AS RMS_Aliases
-FROM Item I
-LEFT JOIN Department D ON D.ID = I.DepartmentID
-LEFT JOIN Category C ON C.ID = I.CategoryID
-LEFT JOIN Supplier S ON S.ID = I.SupplierID
-LEFT JOIN HQcorp.dbo.nitroasl_pamtable PAM ON PAM.ItemID = I.HQID
-OUTER APPLY (
-    SELECT TOP 1
-        SL.ReorderNumber,
-        SL.Cost
-    FROM SupplierList SL
-    WHERE SL.ItemID = I.ID
-      AND SL.SupplierID = I.SupplierID
-    ORDER BY SL.ID
-) PSL
-OUTER APPLY (
-    SELECT TOP 1 A.Alias AS PrimaryBarcode
-    FROM Alias A
-    WHERE A.ItemID = I.ID
-      AND A.Alias IS NOT NULL
-      AND LTRIM(RTRIM(A.Alias)) <> ''
-      AND A.Alias NOT LIKE '%[^0-9]%'
-      AND LEN(LTRIM(RTRIM(A.Alias))) IN (8, 12, 13, 14)
-    ORDER BY
-      CASE LEN(LTRIM(RTRIM(A.Alias)))
-        WHEN 12 THEN 1
-        WHEN 13 THEN 2
-        WHEN 14 THEN 3
-        WHEN 8 THEN 4
-        ELSE 9
-      END,
-      A.ID
-) BAR
-OUTER APPLY (
-    SELECT STUFF((
-        SELECT '|' + REPLACE(LTRIM(RTRIM(A2.Alias)), '|', '')
-        FROM Alias A2
-        WHERE A2.ItemID = I.ID
-          AND A2.Alias IS NOT NULL
-          AND LTRIM(RTRIM(A2.Alias)) <> ''
-        ORDER BY A2.ID
-        FOR XML PATH(''), TYPE
-    ).value('.', 'nvarchar(max)'), 1, 1, '') AS AllAliases
-) ALS
-ORDER BY I.ID;
-"@
-
-$transactionQuery = @"
-SELECT
-    T.CustomerID                                  AS RMSCustomerID,
-    T.StoreID,
-    T.BatchNumber,
-    T.TransactionNumber,
-    T.Time                                        AS SaleDate,
-    CAST(T.Total AS decimal(14,2))                 AS GrossTotal,
-    CAST(ISNULL(T.SalesTax, 0) AS decimal(14,2))  AS SalesTax,
-    CAST(T.Total - ISNULL(T.SalesTax, 0) AS decimal(14,2)) AS PretaxAmount
-FROM PUBLIC_Transaction T
-JOIN Customer C ON C.ID = T.CustomerID
-WHERE
-    T.CustomerID IS NOT NULL
-    AND T.CustomerID <> 0
-    AND T.Time >= DATEADD(day, -91, GETDATE())
-    AND T.Time <= GETDATE()
-    AND ISNULL(C.Employee, 0) <> 1
-ORDER BY
-    T.CustomerID,
-    T.Time,
-    T.TransactionNumber;
-"@
-
-switch ($Action) {
-  "test" {
-    $row = Invoke-SqlRows "SELECT DB_NAME() AS DatabaseName, @@SERVERNAME AS ServerName, @@VERSION AS SqlVersion;"
-    Write-Host "SQL connection succeeded." -ForegroundColor Green
-    $row | Format-List
-    $health = Invoke-RestMethod -Method Get -Uri "$($config.apiBaseUrl.TrimEnd('/'))/health"
-    Write-Host "Railway API connection succeeded." -ForegroundColor Green
-    $health | Format-List
-  }
-
-  "schema" {
-    $q = @"
-SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE TABLE_NAME IN ('Customer','PUBLIC_Transaction')
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    Invoke-SqlRows $q | Format-Table -AutoSize
-  }
-
-  "product-schema" {
-    $q = @"
-SELECT
-    TABLE_NAME,
-    COLUMN_NAME,
-    DATA_TYPE,
-    CHARACTER_MAXIMUM_LENGTH
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE
-    TABLE_NAME LIKE '%Item%'
-    OR TABLE_NAME LIKE '%Product%'
-    OR TABLE_NAME LIKE '%Inventory%'
-    OR TABLE_NAME LIKE '%Supplier%'
-    OR TABLE_NAME LIKE '%Department%'
-    OR TABLE_NAME LIKE '%Category%'
-    OR TABLE_NAME LIKE '%Purchase%'
-    OR TABLE_NAME LIKE '%Transaction%'
-    OR COLUMN_NAME LIKE '%Reorder%'
-    OR COLUMN_NAME LIKE '%Restock%'
-    OR COLUMN_NAME LIKE '%Quantity%'
-    OR COLUMN_NAME LIKE '%Qty%'
-    OR COLUMN_NAME LIKE '%OnHand%'
-    OR COLUMN_NAME LIKE '%OnOrder%'
-    OR COLUMN_NAME LIKE '%Supplier%'
-    OR COLUMN_NAME LIKE '%Department%'
-    OR COLUMN_NAME LIKE '%Category%'
-    OR COLUMN_NAME LIKE '%Discontinued%'
-    OR COLUMN_NAME LIKE '%Inactive%'
-    OR COLUMN_NAME LIKE '%LastSold%'
-    OR COLUMN_NAME LIKE '%LastSale%'
-    OR COLUMN_NAME LIKE '%LastReceived%'
-    OR COLUMN_NAME LIKE '%LastPurchase%'
-    OR COLUMN_NAME LIKE '%Cost%'
-    OR COLUMN_NAME LIKE '%Price%'
-ORDER BY TABLE_NAME, ORDINAL_POSITION;
-"@
-    $rows = @(Invoke-SqlRows $q)
-    Write-Host "Product/inventory schema candidates: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-schema" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    C.ORDINAL_POSITION,
-    C.COLUMN_NAME,
-    C.DATA_TYPE,
-    C.CHARACTER_MAXIMUM_LENGTH,
-    C.NUMERIC_PRECISION,
-    C.NUMERIC_SCALE,
-    C.IS_NULLABLE
-FROM INFORMATION_SCHEMA.TABLES T
-LEFT JOIN INFORMATION_SCHEMA.COLUMNS C
-  ON C.TABLE_SCHEMA=T.TABLE_SCHEMA AND C.TABLE_NAME=T.TABLE_NAME
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Database schema rows: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-tables" {
-    $q = @"
-SELECT
-    TABLE_SCHEMA,
-    TABLE_NAME,
-    TABLE_TYPE
-FROM INFORMATION_SCHEMA.TABLES
-ORDER BY TABLE_SCHEMA,TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    Write-Host "Tables/views found: $($rows.Count)" -ForegroundColor Green
-    $rows | Format-Table -AutoSize
-  }
-
-  "database-access" {
-    $q = @"
-SELECT
-    T.TABLE_SCHEMA,
-    T.TABLE_NAME,
-    T.TABLE_TYPE,
-    CAST(HAS_PERMS_BY_NAME(
-        QUOTENAME(T.TABLE_SCHEMA) + '.' + QUOTENAME(T.TABLE_NAME),
-        'OBJECT',
-        'SELECT'
-    ) AS int) AS CanSelect
-FROM INFORMATION_SCHEMA.TABLES T
-ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME;
-"@
-    $rows=@(Invoke-SqlRows $q)
-    $readable=@($rows | Where-Object { [int]$_.CanSelect -eq 1 })
-    $blocked=@($rows | Where-Object { [int]$_.CanSelect -ne 1 })
-    Write-Host "Visible tables/views: $($rows.Count)" -ForegroundColor Green
-    Write-Host "Readable with current SQL login: $($readable.Count)" -ForegroundColor Green
-    Write-Host "Not readable with current SQL login: $($blocked.Count)" -ForegroundColor $(if($blocked.Count -eq 0){"Green"}else{"Yellow"})
-    $rows | Format-Table -AutoSize
-  }
-
 
   "migration-discovery" {
     $targets = @(
