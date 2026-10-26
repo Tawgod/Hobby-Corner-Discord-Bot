@@ -28,10 +28,28 @@ if ($null -eq $claim.job) {
 }
 
 $jobId = [int]$claim.job.id
-$action = [string]$claim.job.job_type
+$action = ([string]$claim.job.job_type).Trim().ToLowerInvariant()
 $args = $claim.job.args
+
+$allowedActions = @(
+  "test","schema","product-schema","database-schema","database-tables","database-access",
+  "database-relations","migration-discovery","operational-discovery","read-catalog","read-query",
+  "safety-test","product-web-diagnostic","table-preview","table-count","customers-preview",
+  "product-export","snapshot"
+)
+if ($allowedActions -notcontains $action) {
+  throw "Remote worker rejected unsupported bridge action: $action"
+}
+
 $tableName = if ($args -and $args.table_name) { [string]$args.table_name } else { "" }
 $previewRows = if ($args -and $args.preview_rows) { [int]$args.preview_rows } else { 25 }
+$queryName = if ($args -and $args.query_name) { [string]$args.query_name } else { "" }
+$itemLookupCode = if ($args -and $args.item_lookup_code) { [string]$args.item_lookup_code } else { "" }
+$customerId = if ($args -and $args.customer_id) { [string]$args.customer_id } else { "" }
+$supplierId = if ($args -and $args.supplier_id) { [string]$args.supplier_id } else { "" }
+$startDate = if ($args -and $args.start_date) { [string]$args.start_date } else { "" }
+$endDate = if ($args -and $args.end_date) { [string]$args.end_date } else { "" }
+$limit = if ($args -and $args.limit) { [int]$args.limit } else { 250 }
 $resultText = ""
 $errorText = ""
 $status = "success"
@@ -40,6 +58,15 @@ try {
   $bridgeArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$bridgePath,"-Action",$action)
   if ($tableName) { $bridgeArgs += @("-TableName",$tableName) }
   if ($action -eq "table-preview") { $bridgeArgs += @("-PreviewRows",[string]$previewRows) }
+  if ($action -eq "read-query") {
+    if (-not $queryName) { throw "read-query job is missing query_name." }
+    $bridgeArgs += @("-QueryName",$queryName,"-Limit",[string]$limit)
+    if ($itemLookupCode) { $bridgeArgs += @("-ItemLookupCode",$itemLookupCode) }
+    if ($customerId) { $bridgeArgs += @("-CustomerID",$customerId) }
+    if ($supplierId) { $bridgeArgs += @("-SupplierID",$supplierId) }
+    if ($startDate) { $bridgeArgs += @("-StartDate",$startDate) }
+    if ($endDate) { $bridgeArgs += @("-EndDate",$endDate) }
+  }
   $resultText = (& powershell.exe @bridgeArgs 2>&1 | Out-String)
   if ($LASTEXITCODE -ne 0) {
     $status = "failed"
