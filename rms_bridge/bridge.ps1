@@ -445,33 +445,37 @@ ORDER BY P.OpenTime DESC,P.ID DESC,E.ID DESC;
       }
     }
     "account-history" {
-      Test-RequiredColumns @{ "AccountReceivableHistory"=@("ID","StoreID","AccountReceivableID","BatchNumber","Amount","PaymentID","Date","HistoryType","Comment") }
+      Test-RequiredColumns @{ "AccountReceivableHistory"=@("ID","StoreID","AccountReceivableID","BatchNumber","Amount","PaymentID","Date","HistoryType","Comment"); "AccountReceivable"=@("ID","StoreID","CustomerID","OriginalAmount","Balance","DueDate") }
       $parts=@()
       if ($params.ContainsKey("StartDate")) { $parts += "H.[Date] >= @StartDate" }
       if ($params.ContainsKey("EndDate")) { $parts += "H.[Date] < @EndDate" }
+      if ($CustomerID) { $parts += "A.CustomerID=@CustomerID"; $params["CustomerID"]=$CustomerID.Trim() }
       $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
       return @{ Parameters=$params; Sql=@"
 SELECT TOP $top H.ID,H.StoreID,H.AccountReceivableID,H.BatchNumber,H.Amount,
  H.PaymentID,H.[Date] AS HistoryDate,H.HistoryType,H.Comment,H.CashierID,
- H.TransferArID,H.ReasonCodeID
+ H.TransferArID,H.ReasonCodeID,A.CustomerID,A.OriginalAmount,A.Balance AS CurrentAccountBalance,A.DueDate
 FROM AccountReceivableHistory H
+LEFT JOIN AccountReceivable A ON A.ID=H.AccountReceivableID AND A.StoreID=H.StoreID
 $predicate
 ORDER BY H.[Date] DESC,H.ID DESC;
 "@
       }
     }
     "purchase-order-lines" {
-      Test-RequiredColumns @{ "PurchaseOrderEntry"=@("ID","StoreID","PurchaseOrderID","ItemID","QuantityOrdered","QuantityReceived","QuantityReceivedToDate","Price","LastUpdated","LastReceivedDate") ; "Item"=@("ID","ItemLookupCode","Description") }
+      Test-RequiredColumns @{ "PurchaseOrderEntry"=@("ID","StoreID","PurchaseOrderID","ItemID","QuantityOrdered","QuantityReceived","QuantityReceivedToDate","Price","LastUpdated","LastReceivedDate") ; "Item"=@("ID","ItemLookupCode","Description"); "PurchaseOrder"=@("ID","StoreID","PONumber","SupplierID","Status","DateCreated","DatePlaced") }
       $parts=@()
-      if ($params.ContainsKey("StartDate")) { $parts += "E.LastUpdated >= @StartDate" }
-      if ($params.ContainsKey("EndDate")) { $parts += "E.LastUpdated < @EndDate" }
+      if ($params.ContainsKey("StartDate")) { $parts += "P.DateCreated >= @StartDate" }
+      if ($params.ContainsKey("EndDate")) { $parts += "P.DateCreated < @EndDate" }
       if (-not [string]::IsNullOrWhiteSpace($ItemLookupCode)) { $parts += "I.ItemLookupCode=@Sku"; $params["Sku"]=$ItemLookupCode.Trim() }
+      if ($SupplierID) { $parts += "P.SupplierID=@SupplierID"; $params["SupplierID"]=$SupplierID.Trim() }
       $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
       return @{ Parameters=$params; Sql=@"
 SELECT TOP $top E.ID,E.StoreID,E.PurchaseOrderID,E.ItemID,I.ItemLookupCode AS RMS_SKU,
  I.Description,E.ItemDescription,E.OrderNumber,E.QuantityOrdered,E.QuantityReceived,
- E.QuantityReceivedToDate,E.Price,E.LastUpdated,E.LastReceivedDate,E.ShippingPerItem,E.OtherFeesPerItem
+ E.QuantityReceivedToDate,E.Price,P.PONumber,P.SupplierID,P.Status AS POStatus,P.DateCreated,P.DatePlaced,E.LastUpdated,E.LastReceivedDate,E.ShippingPerItem,E.OtherFeesPerItem
 FROM PurchaseOrderEntry E
+LEFT JOIN PurchaseOrder P ON P.ID=E.PurchaseOrderID AND P.StoreID=E.StoreID
 LEFT JOIN Item I ON I.ID=E.ItemID
 $predicate
 ORDER BY E.LastUpdated DESC,E.ID DESC;
@@ -479,15 +483,18 @@ ORDER BY E.LastUpdated DESC,E.ID DESC;
       }
     }
     "order-history" {
-      Test-RequiredColumns @{ "OrderHistory"=@("ID","StoreID","BatchNumber","Date","OrderID","CashierID","DeltaDeposit","TransactionNumber","Comment") }
+      Test-RequiredColumns @{ "OrderHistory"=@("ID","StoreID","BatchNumber","Date","OrderID","CashierID","DeltaDeposit","TransactionNumber","Comment"); "Order"=@("ID","StoreID","CustomerID","Time","Type","Closed","Deposit","Total") }
       $parts=@()
       if ($params.ContainsKey("StartDate")) { $parts += "H.[Date] >= @StartDate" }
       if ($params.ContainsKey("EndDate")) { $parts += "H.[Date] < @EndDate" }
+      if ($CustomerID) { $parts += "O.CustomerID=@CustomerID"; $params["CustomerID"]=$CustomerID.Trim() }
       $predicate=if($parts.Count){"WHERE "+($parts -join " AND ")}else{""}
       return @{ Parameters=$params; Sql=@"
 SELECT TOP $top H.ID,H.StoreID,H.BatchNumber,H.[Date] AS HistoryDate,H.OrderID,
- H.CashierID,H.DeltaDeposit,H.TransactionNumber,H.Comment
+ H.CashierID,H.DeltaDeposit,H.TransactionNumber,H.Comment,
+ O.CustomerID,O.[Time] AS OrderCreated,O.[Type] AS OrderType,O.Closed,O.Deposit AS CurrentDeposit,O.Total AS OrderTotal
 FROM OrderHistory H
+LEFT JOIN [Order] O ON O.ID=H.OrderID AND O.StoreID=H.StoreID
 $predicate
 ORDER BY H.[Date] DESC,H.ID DESC;
 "@
