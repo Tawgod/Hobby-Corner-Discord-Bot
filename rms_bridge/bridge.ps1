@@ -294,7 +294,8 @@ SELECT TOP $top
 FROM PUBLIC_Transaction T
 $predicate
 ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber;
-"@ }
+"@
+      }
     }
     "sales-by-item" {
       Test-RequiredColumns @{
@@ -314,7 +315,8 @@ JOIN PUBLIC_Transaction T ON T.StoreID=E.StoreID AND T.TransactionNumber=E.Trans
 LEFT JOIN Item I ON I.ID=E.ItemID
 $predicate
 ORDER BY T.Time DESC,T.StoreID,T.TransactionNumber,E.ItemID;
-"@ }
+"@
+      }
     }
     "supplier-items" {
       Test-RequiredColumns @{
@@ -335,7 +337,8 @@ LEFT JOIN Supplier S ON S.ID=SL.SupplierID
 LEFT JOIN Item I ON I.ID=SL.ItemID
 $supplierWhere
 ORDER BY S.SupplierName,I.ItemLookupCode,SL.ID;
-"@ }
+"@
+      }
     }
     "item-pricing" {
       Test-RequiredColumns @{ "Item"=@("ID","ItemLookupCode","Description","Cost","LastCost","ReplacementCost","Price","MSRP","LastUpdated") }
@@ -350,7 +353,8 @@ SELECT TOP $top
 FROM Item I
 $itemWhere
 ORDER BY I.LastUpdated DESC,I.ID;
-"@ }
+"@
+      }
     }
     "classifications" {
       Test-RequiredColumns @{
@@ -367,7 +371,8 @@ FROM Item I
 LEFT JOIN Department D ON D.ID=I.DepartmentID
 LEFT JOIN Category C ON C.ID=I.CategoryID
 ORDER BY D.Name,C.Name,I.ItemLookupCode;
-"@ }
+"@
+      }
     }
     "customers" {
       Test-RequiredColumns @{ "Customer"=@("ID","AccountNumber","FirstName","LastName","Company","EmailAddress","PhoneNumber","AccountOpened","LastVisit","TotalVisits","TotalSales","LastUpdated") }
@@ -377,7 +382,8 @@ SELECT TOP $top
  C.AccountOpened,C.LastVisit,C.TotalVisits,C.TotalSales,C.LastUpdated
 FROM Customer C
 ORDER BY C.LastUpdated DESC,C.ID;
-"@ }
+"@
+      }
     }
     default { throw "Unknown read query '$Name'. Use -Action read-catalog for allowed presets." }
   }
@@ -564,7 +570,7 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
     $top=[Math]::Max(1,[Math]::Min([int]$Limit,2000))
     $safeTable=Resolve-SafeSourceTable $DataSource $TableName
     $rows=@(Invoke-SqlRows "SELECT TOP $top * FROM $safeTable;")
-    Write-Host "Reading TOP $top from $DataSource::$TableName; returned $($rows.Count) row(s)." -ForegroundColor Green
+    Write-Host "Reading TOP $top from ${DataSource}::$TableName; returned $($rows.Count) row(s)." -ForegroundColor Green
     Write-Output (ConvertTo-Json -InputObject $rows -Depth 8 -Compress)
   }
 
