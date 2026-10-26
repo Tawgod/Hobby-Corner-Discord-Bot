@@ -4,7 +4,7 @@
 
 This branch expands the existing Hobby Corner RMS bridge into a reusable, read-only operational/history access layer. It is intentionally separate from the product-migration branch so the known-good product export remains unchanged.
 
-The bridge does **not** accept arbitrary SQL. Remote requests are limited to named actions and named query presets, and every SQL statement executed by `Invoke-SqlRows` passes a local read-only SQL guard before it is sent to SQL Server.
+The bridge does **not** accept arbitrary SQL. Remote requests are limited to named actions, named query presets, and exact-table reads resolved from database metadata. Every SQL statement executed by `Invoke-SqlRows` passes a local read-only SQL guard before it is sent to SQL Server.
 
 ## Safety model
 
@@ -18,6 +18,19 @@ The bridge does **not** accept arbitrary SQL. Remote requests are limited to nam
 - No destructive or RMS write operation is implemented.
 
 The database login should still remain SQL-side read-only. Application safeguards are defense in depth, not a replacement for SQL permissions.
+
+## General HCDB / HQ explorer
+
+For future migration, reporting, reconciliation, or business-history work, the bridge can now enumerate and read exact tables/views without adding a new query each time.
+
+- `source-tables -DataSource store` lists HCDB tables/views.
+- `source-schema -DataSource store -TableName <name>` returns a table's columns.
+- `table-read -DataSource store -TableName <name> -Limit <1..2000>` returns bounded JSON rows.
+- The same actions support `-DataSource hq`, using `hqDatabase` from config (default `HQcorp`).
+
+This is the broad access path for customer, sales, account/AR, item, item movement, inventory, purchase-order, supplier, department/category, and other legacy HCDB data as those tables are identified. HQ should primarily be used for web/item metadata.
+
+Generic reads accept an exact table/view name only; they do not accept caller-supplied SQL or arbitrary WHERE clauses. Common datasets should still graduate into named presets once their joins/keys are confirmed.
 
 ## Existing confirmed relationships
 
