@@ -432,6 +432,13 @@ class RmsJobCreate(BaseModel):
     job_type: str
     table_name: str|None=None
     preview_rows: int|None=25
+    query_name: str|None=None
+    item_lookup_code: str|None=None
+    customer_id: str|None=None
+    supplier_id: str|None=None
+    start_date: str|None=None
+    end_date: str|None=None
+    limit: int|None=250
 
 class RmsJobComplete(BaseModel):
     status: str
@@ -537,6 +544,9 @@ pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8
 <button class="secondary" onclick="queueJob('database-tables')">List All Tables / Views</button>
 <button class="secondary" onclick="queueJob('database-schema')">Full Database Schema</button>
 <button class="secondary" onclick="queueJob('database-relations')">Relationship Scan</button>
+<button class="secondary" onclick="queueJob('operational-discovery')">Operational / History Discovery</button>
+<button class="secondary" onclick="queueJob('read-catalog')">Read Query Catalog</button>
+<button class="secondary" onclick="queueJob('safety-test')">Read-only Safety Test</button>
 <p class="small">The RMS server checks for queued work periodically. No inbound connection to SQL Server is opened.</p>
 </div>
 <div class="card">
@@ -547,6 +557,18 @@ pre{white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8
 <button class="secondary" onclick="queueTableJob('table-count')">Count Rows</button>
 <button class="secondary" onclick="queueTableJob('table-preview')">Preview Table</button>
 </div>
+<div class="card">
+<h2>Named historical read</h2>
+<p class="small">Runs a predefined SELECT-only preset. No arbitrary SQL is accepted. Limit is capped at 2,000 rows.</p>
+<input id="queryName" placeholder="receipts, sales-by-item, supplier-items, item-pricing, classifications, customers">
+<input id="sku" placeholder="Optional SKU / ItemLookupCode">
+<input id="customerId" placeholder="Optional RMS customer ID">
+<input id="supplierId" placeholder="Optional RMS supplier ID">
+<input id="startDate" placeholder="Optional start date (YYYY-MM-DD)">
+<input id="endDate" placeholder="Optional end date (exclusive YYYY-MM-DD)">
+<input id="queryLimit" type="number" min="1" max="2000" value="250" style="width:100px">
+<button class="secondary" onclick="queueReadQuery()">Run read query</button>
+</div>
 <div class="card"><h2>Recent jobs</h2><button class="secondary" onclick="loadJobs()">Refresh status</button>
 <div id="jobs"></div></div>
 <script>
@@ -556,6 +578,21 @@ function saveKey(){key=document.getElementById('key').value.trim();sessionStorag
 async function api(url,opts={}){key=document.getElementById('key').value.trim();opts.headers={...(opts.headers||{}),'x-admin-key':key};let r=await fetch(url,opts);if(!r.ok)throw new Error(await r.text());return r.json();}
 async function queueJob(t){try{let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
 async function queueTableJob(t){try{let table=document.getElementById('tableName').value.trim();let rows=parseInt(document.getElementById('previewRows').value||'25',10);if(!table)throw new Error('Enter an exact table/view name first.');let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({job_type:t,table_name:table,preview_rows:rows})});alert('Queued job #'+j.id);loadJobs();}catch(e){alert(e.message)}}
+async function queueReadQuery(){try{
+  let body={
+    job_type:'read-query',
+    query_name:document.getElementById('queryName').value.trim(),
+    item_lookup_code:document.getElementById('sku').value.trim()||null,
+    customer_id:document.getElementById('customerId').value.trim()||null,
+    supplier_id:document.getElementById('supplierId').value.trim()||null,
+    start_date:document.getElementById('startDate').value.trim()||null,
+    end_date:document.getElementById('endDate').value.trim()||null,
+    limit:parseInt(document.getElementById('queryLimit').value||'250',10)
+  };
+  if(!body.query_name)throw new Error('Enter a named read query first.');
+  let j=await api('/admin/rms-jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  alert('Queued job #'+j.id);loadJobs();
+}catch(e){alert(e.message)}}
 function esc(s){return String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}
 async function loadJobs(){try{let d=await api('/admin/rms-jobs');let h='<table><tr><th>ID</th><th>Action</th><th>Status</th><th>Requested</th><th>Result</th></tr>';for(let j of d.jobs){let detail=j.error_text||j.result_text||'';h+='<tr><td>'+j.id+'</td><td>'+esc(j.job_type)+'</td><td>'+esc(j.status)+'</td><td>'+esc(j.requested_at)+'</td><td><details><summary>view</summary><pre>'+esc(detail)+'</pre></details></td></tr>'}h+='</table>';document.getElementById('jobs').innerHTML=h;}catch(e){document.getElementById('jobs').innerHTML='<p class="bad">'+esc(e.message)+'</p>'}}
 if(key)loadJobs();
@@ -567,7 +604,7 @@ setInterval(()=>{if(document.getElementById('key').value.trim())loadJobs()},1500
 def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
     admin(x_admin_key)
     job_type=body.job_type.strip().lower()
-    supported={"snapshot","test","schema","product-schema","database-schema","database-tables","database-relations","table-preview","table-count"}
+    supported={"snapshot","test","schema","product-schema","database-schema","database-tables","database-access","database-relations","migration-discovery","operational-discovery","read-catalog","read-query","safety-test","product-web-diagnostic","table-preview","table-count","customers-preview","product-export"}
     if job_type not in supported:
         raise HTTPException(400,"Unsupported RMS job type")
     args={}
@@ -583,6 +620,32 @@ def create_rms_job(body:RmsJobCreate,x_admin_key:str|None=Header(default=None)):
         if rows<1 or rows>100:
             raise HTTPException(400,"preview_rows must be between 1 and 100")
         args["preview_rows"]=rows
+    if job_type=="read-query":
+        query_name=(body.query_name or "").strip().lower()
+        allowed_queries={"receipts","sales-by-item","supplier-items","item-pricing","classifications","customers"}
+        if query_name not in allowed_queries:
+            raise HTTPException(400,"Unsupported RMS read query")
+        args["query_name"]=query_name
+        limit=int(body.limit or 250)
+        if limit<1 or limit>2000:
+            raise HTTPException(400,"limit must be between 1 and 2000")
+        args["limit"]=limit
+        optional={
+            "item_lookup_code":body.item_lookup_code,
+            "customer_id":body.customer_id,
+            "supplier_id":body.supplier_id,
+            "start_date":body.start_date,
+            "end_date":body.end_date,
+        }
+        for key,value in optional.items():
+            if value is None:
+                continue
+            value=str(value).strip()
+            if not value:
+                continue
+            if len(value)>128:
+                raise HTTPException(400,f"{key} is too long")
+            args[key]=value
     with db() as conn, conn.cursor() as cur:
         if args:
             cur.execute("""select id from rms_bridge_jobs
