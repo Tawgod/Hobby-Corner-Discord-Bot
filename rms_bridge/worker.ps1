@@ -33,7 +33,7 @@ $args = $claim.job.args
 
 $allowedActions = @(
   "test","schema","product-schema","database-schema","database-tables","database-access",
-  "database-relations","migration-discovery","operational-discovery","read-catalog","read-query",
+  "database-relations","migration-discovery","operational-discovery","source-tables","source-schema","table-read","read-catalog","read-query",
   "safety-test","product-web-diagnostic","table-preview","table-count","customers-preview",
   "product-export","snapshot"
 )
@@ -44,6 +44,8 @@ if ($allowedActions -notcontains $action) {
 $tableName = if ($args -and $args.table_name) { [string]$args.table_name } else { "" }
 $previewRows = if ($args -and $args.preview_rows) { [int]$args.preview_rows } else { 25 }
 $queryName = if ($args -and $args.query_name) { [string]$args.query_name } else { "" }
+$dataSource = if ($args -and $args.data_source) { [string]$args.data_source } else { "store" }
+if (@("store","hq") -notcontains $dataSource) { throw "Unsupported data_source: $dataSource" }
 $itemLookupCode = if ($args -and $args.item_lookup_code) { [string]$args.item_lookup_code } else { "" }
 $customerId = if ($args -and $args.customer_id) { [string]$args.customer_id } else { "" }
 $supplierId = if ($args -and $args.supplier_id) { [string]$args.supplier_id } else { "" }
@@ -57,6 +59,8 @@ $status = "success"
 try {
   $bridgeArgs = @("-NoProfile","-ExecutionPolicy","Bypass","-File",$bridgePath,"-Action",$action)
   if ($tableName) { $bridgeArgs += @("-TableName",$tableName) }
+  if ($action -in @("source-tables","source-schema","table-read")) { $bridgeArgs += @("-DataSource",$dataSource) }
+  if ($action -eq "table-read") { $bridgeArgs += @("-Limit",[string]$limit) }
   if ($action -eq "table-preview") { $bridgeArgs += @("-PreviewRows",[string]$previewRows) }
   if ($action -eq "read-query") {
     if (-not $queryName) { throw "read-query job is missing query_name." }
