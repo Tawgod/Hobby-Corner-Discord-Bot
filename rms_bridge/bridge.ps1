@@ -563,8 +563,9 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
   "table-read" {
     $top=[Math]::Max(1,[Math]::Min([int]$Limit,2000))
     $safeTable=Resolve-SafeSourceTable $DataSource $TableName
-    Write-Host "Reading TOP $top from $DataSource::$TableName" -ForegroundColor Green
-    Invoke-SqlRows "SELECT TOP $top * FROM $safeTable;" | Format-Table -AutoSize
+    $rows=@(Invoke-SqlRows "SELECT TOP $top * FROM $safeTable;")
+    Write-Host "Reading TOP $top from $DataSource::$TableName; returned $($rows.Count) row(s)." -ForegroundColor Green
+    Write-Output (ConvertTo-Json -InputObject $rows -Depth 8 -Compress)
   }
 
   "safety-test" {
@@ -594,7 +595,7 @@ ORDER BY T.TABLE_SCHEMA,T.TABLE_NAME,C.ORDINAL_POSITION;
     $spec=Get-ReadQuery $QueryName
     $rows=@(Invoke-SqlRows $spec.Sql $spec.Parameters)
     Write-Host "Read preset '$QueryName' returned $($rows.Count) row(s)." -ForegroundColor Green
-    $rows | Format-Table -AutoSize
+    Write-Output (ConvertTo-Json -InputObject $rows -Depth 8 -Compress)
   }
 
   "operational-discovery" {
