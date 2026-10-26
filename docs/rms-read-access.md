@@ -176,3 +176,26 @@ Run these from the RMS bridge after the updated worker is installed:
 ```
 
 After the operational discovery output confirms the purchase-order and inventory movement schemas, add those joins as new named presets rather than enabling arbitrary SQL.
+
+## October 26 live HCDB schema evidence
+
+The store's Windows PowerShell read tests confirmed **230 HCDB tables/views**, **16 HQcorp tables/views**, working receipt/supplier query results, and an updated worker task pointing to `C:\HobbyCorner\RMSBridge\worker.ps1`.
+
+The following are now grounded in actual HCDB columns (the table names and column types were supplied by the RMS machine; joins must still be validated with live sample rows):
+
+| Read preset | Table(s) | Linking/date fields | Caution |
+|---|---|---|---|
+| `item-movements` | `InventoryTransferLog`, `Item` | `ItemID -> Item.ID`, `DateTransferred` | `Type`/sign semantics need verification |
+| `item-value-history` | `ItemValueLog`, `Item` | `ItemID -> Item.ID`, `LastUpdated` | `AmountType` meanings need verification |
+| `physical-inventory` | `PhysicalInventory`, `PhysicalInventoryEntry`, `Item` | `PhysicalInventoryID -> ID`, `StoreID`, `ItemID`, `OpenTime` | Physical count records are not equivalent to cutover stock |
+| `account-history` | `AccountReceivableHistory` | `AccountReceivableID`, `Date`, `PaymentID`, `HistoryType` | Need account master schema to map to customers |
+| `purchase-order-lines` | `PurchaseOrderEntry`, `Item` | `PurchaseOrderID`, `ItemID`, `LastUpdated`, `LastReceivedDate` | Need PurchaseOrder header schema for supplier/order date |
+| `order-history` | `OrderHistory` | `OrderID`, `Date`, `TransactionNumber` | Need Order master schema for customer linkage |
+
+Also confirmed: `TransactionEntry` includes `StoreID`, `TransactionNumber`, `ItemID`, `Price`, `Cost`, `Quantity`, `SalesTax`, and `TransactionTime`; the sale-line join must be verified for `PUBLIC_TransactionEntry` and transaction batch/store identity before reporting totals.
+
+The existing `VIEWITEMMOVEMENTHISTORY` view contains `ITEMLOOKUPCODE`, `TYPE`, `QUANTITY`, `DATETRANSFERRED`, `REFERENCEID`, `REFERENCEENTRYID`, `PONUMBER` and `TRANSACTIONNUMBER`. `VIEWITEMMOVEMENT` adds price and cost sold. These views are useful for consistency checks.
+
+### Next schema reads
+
+Collect field definitions from `Transaction`, `PUBLIC_TransactionEntry`, `PurchaseOrder`, `AccountReceivable`, `Order`, and `Item`, then test **five non-sensitive rows** from each new preset. Confirm movement type and value-log amount-type semantics before calculating inventory or pricing trends.
