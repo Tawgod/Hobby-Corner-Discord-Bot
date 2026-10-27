@@ -1665,6 +1665,50 @@ def discord_message_watch_payload(message, parsed):
         "confidence": parsed.get("confidence")
     }
 
+
+def load_discord_ready_notifications(limit=20):
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        return []
+    response = requests.get(
+        f"{SPECIAL_ORDERS_API_URL}/notifications/discord-delivery",
+        headers=special_orders_headers(),
+        params={"limit": limit},
+        timeout=10
+    )
+    data = response.json() if response.content else []
+    if not response.ok:
+        raise RuntimeError(data.get("error", response.text) if isinstance(data, dict) else response.text)
+    return data if isinstance(data, list) else []
+
+def claim_discord_ready_notification(notification_id):
+    response = requests.post(
+        f"{SPECIAL_ORDERS_API_URL}/notifications/{notification_id}/claim-discord",
+        headers=special_orders_headers(),
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+    if response.status_code == 409:
+        return None
+    if not response.ok:
+        raise RuntimeError(data.get("error", response.text))
+    return data
+
+def complete_discord_ready_notification(notification_id, success, external_message_id=None, error=None):
+    response = requests.post(
+        f"{SPECIAL_ORDERS_API_URL}/notifications/{notification_id}/complete-discord",
+        headers={**special_orders_headers(), "Content-Type": "application/json"},
+        json={
+            "success": bool(success),
+            "external_message_id": str(external_message_id) if external_message_id else None,
+            "error": str(error)[:1000] if error else None
+        },
+        timeout=10
+    )
+    data = response.json() if response.content else {}
+    if not response.ok:
+        raise RuntimeError(data.get("error", response.text))
+    return data
+
 def build_gw_preorder_embed(item):
     embed = discord.Embed(
         title=str(item.get("title") or "GW Preorder")[:256],
@@ -2172,6 +2216,57 @@ async def before_master_customer_sync():
 # ==========================================
 # 4. BOT EVENTS & LISTENERS
 # ==========================================
+
+@tasks.loop(seconds=20)
+async def deliver_special_order_discord_notifications():
+    if not SPECIAL_ORDERS_API_URL or not SPECIAL_ORDERS_ADMIN_KEY:
+        return
+    try:
+        queued = load_discord_ready_notifications(20)
+    except Exception as e:
+        print(f"❌ Could not load Special Orders Discord notification queue: {e}")
+        return
+
+    for item in queued:
+        notification_id = item.get("id")
+        recipient = str(item.get("recipient") or "").strip()
+        message_text = str(item.get("message") or "").strip()
+        if not notification_id or not recipient or not message_text:
+            continue
+
+        try:
+            claimed = claim_discord_ready_notification(notification_id)
+            if not claimed:
+                continue
+        except Exception as e:
+            print(f"❌ Could not claim Special Orders notification {notification_id}: {e}")
+            continue
+
+        try:
+            user = await bot.fetch_user(int(recipient))
+            sent = await user.send(message_text)
+            complete_discord_ready_notification(
+                notification_id,
+                True,
+                external_message_id=getattr(sent, "id", None)
+            )
+            print(f"✅ Sent Special Orders ready DM notification {notification_id} to Discord user {recipient}.")
+        except Exception as e:
+            try:
+                complete_discord_ready_notification(notification_id, False, error=e)
+            except Exception as complete_error:
+                print(
+                    f"❌ Notification {notification_id} send failed ({e}); "
+                    f"could not record failure: {complete_error}"
+                )
+            else:
+                print(f"❌ Special Orders ready DM notification {notification_id} failed: {e}")
+
+@deliver_special_order_discord_notifications.before_loop
+async def before_special_order_discord_notifications():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     print(f"✅ Logged in as {bot.user}")
@@ -2200,6 +2295,10 @@ async def on_ready():
     if not sync_master_customer_list_hourly.is_running():
         sync_master_customer_list_hourly.start()
         print("✅ Hourly Master Customer List sync started.")
+
+    if not deliver_special_order_discord_notifications.is_running():
+        deliver_special_order_discord_notifications.start()
+        print("✅ Special Orders Discord notification delivery worker started.")
 
 @bot.event
 async def on_raw_reaction_add(payload):
