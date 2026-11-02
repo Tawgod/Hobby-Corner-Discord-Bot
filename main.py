@@ -5,6 +5,7 @@ import gspread
 import re
 import asyncio
 import requests
+from security_invite import eligible, issue_invitation
 from discord.ext import commands, tasks
 from discord import app_commands
 from oauth2client.service_account import ServiceAccountCredentials
@@ -1556,6 +1557,76 @@ async def hc_timeclock(interaction: discord.Interaction):
         view=TimeclockControlPanel(is_admin),
         ephemeral=True
     )
+
+
+# DEVELOPMENT ONLY: setup invitations cannot approve MFA or generate QR seeds.
+SECURITY_ENROLLMENT_API_URL=os.environ.get("SECURITY_ENROLLMENT_API_URL","").strip()
+SECURITY_ENROLLMENT_PUBLIC_ORIGIN=os.environ.get("SECURITY_ENROLLMENT_PUBLIC_ORIGIN","").strip()
+SECURITY_ENROLLMENT_BOT_KEY=os.environ.get("SECURITY_ENROLLMENT_BOT_KEY","").strip()
+SECURITY_ENROLLMENT_GUILD_ID=os.environ.get("SECURITY_ENROLLMENT_GUILD_ID","").strip()
+SECURITY_OWNER_ROLE_ID=os.environ.get("SECURITY_OWNER_ROLE_ID","").strip()
+
+@hc_group.command(name="security_setup",description="Admin/Owner: invite a linked employee to set up Authenticator")
+@app_commands.describe(employee="Employee to invite for private Authenticator setup")
+async def hc_security_setup(interaction: discord.Interaction, employee: discord.Member):
+    if (
+        interaction.guild is None or
+        str(interaction.guild.id)!=SECURITY_ENROLLMENT_GUILD_ID or
+        not SECURITY_ENROLLMENT_GUILD_ID or
+        not eligible(
+            [str(r.id) for r in getattr(interaction.user,"roles",[])],
+            [str(r.id) for r in getattr(employee,"roles",[])],
+            staff_role=TIMECLOCK_STAFF_ROLE_ID,
+            admin_role=TIMECLOCK_ADMIN_ROLE_ID,
+            owner_role=SECURITY_OWNER_ROLE_ID
+        )
+    ):
+        await interaction.response.send_message(
+            "Only an authorized Admin or Owner can invite an eligible employee.",
+            ephemeral=True
+        )
+        return
+    if not all((SECURITY_ENROLLMENT_API_URL,SECURITY_ENROLLMENT_PUBLIC_ORIGIN,SECURITY_ENROLLMENT_BOT_KEY)):
+        await interaction.response.send_message(
+            "Security invitations are not configured in this environment.",ephemeral=True
+        )
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        link=await asyncio.to_thread(
+            issue_invitation,
+            post=requests.post,
+            api_url=SECURITY_ENROLLMENT_API_URL,
+            public_origin=SECURITY_ENROLLMENT_PUBLIC_ORIGIN,
+            bot_key=SECURITY_ENROLLMENT_BOT_KEY,
+            guild_id=str(interaction.guild.id),
+            actor_id=str(interaction.user.id),
+            target_id=str(employee.id),
+            actor_roles=[str(r.id) for r in interaction.user.roles]
+        )
+    except Exception:
+        await interaction.followup.send(
+            "Invitation unavailable. Check linked active Timeclock employees and security configuration.",
+            ephemeral=True
+        )
+        return
+    try:
+        await employee.send(
+            "**Hobby Corner Authenticator setup**\n"
+            "Your administrator invited you to set up account security. "
+            "Sign in using your Timeclock PIN. The private invitation expires "
+            "after 15 minutes and still requires an independent manager approval.\n"
+            +link
+        )
+        await interaction.followup.send(
+            "Private invitation sent. After employee sign-in a passkey-verified "
+            "manager must approve the enrollment request.",ephemeral=True
+        )
+    except (discord.Forbidden,discord.HTTPException):
+        await interaction.followup.send(
+            "DMs are disabled. Privately give this single-use invitation to the intended employee only:\n"+link,
+            ephemeral=True
+        )
 
 bot.tree.add_command(hc_group)
 
