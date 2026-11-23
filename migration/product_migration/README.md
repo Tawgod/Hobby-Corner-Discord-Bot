@@ -321,3 +321,12 @@ Supplier-cost precedence for the controlled payload is the primary-supplier `RMS
 - `General > Other` is intentionally created/verified by the existing safe category reconciliation flow if missing.
 - Future unmapped category pairs remain review-visible; these explicit fallbacks do not suppress newly emerging high-volume mapping gaps.
 - Status: implemented; runtime verification pending v67 setup/test.
+
+
+### v68 source freshness and new-dimension audit
+- The RMS bridge product export now writes a matched `.manifest.json` sidecar containing the UTC export time, CSV SHA-256, exported row count, and direct RMS snapshot counts for Item, Supplier, Department, Category, Alias, SupplierList, distinct brands, and latest Item.LastUpdated.
+- Notebook setup requires the manifest by default, verifies the CSV hash and row count, and fails closed when the authoritative export is older than `MAX_RMS_EXPORT_AGE_HOURS` (default 6 hours).
+- Setup now produces a `Source Freshness Audit` identifying source departments, department/category pairs, suppliers, and manufacturers/brands that are present in the fresh RMS export but absent from current migration mappings/reference data.
+- This audit intentionally reports new named suppliers even though v67 may otherwise fall them back to Lightspeed `Other`; newly-added real suppliers therefore cannot pass unnoticed.
+- New SKUs/items and aliases are included by the fresh full-table RMS export and continue through existing identity/collision validation.
+- Status: implemented in source; requires the next RMS export to copy the CSV and its manifest sidecar together. No production Lightspeed writes are performed by these checks.
