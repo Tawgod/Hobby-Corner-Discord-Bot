@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import re
+import hashlib
+import json
+import os
 from collections import Counter, defaultdict
 from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 import pandas as pd
@@ -170,6 +174,164 @@ def source_identity_review_flags(row: pd.Series) -> list[str]:
         flags.append("barcode_identity_conflict")
 
     return flags
+
+
+
+def validate_rms_export_manifest(
+    csv_path: str,
+    *,
+    max_age_hours: float = 6.0,
+    require_manifest: bool = True,
+) -> dict:
+    """
+    Validate the RMS bridge sidecar manifest for the authoritative CSV.
+
+    This prevents a successful migration setup from silently using an older
+    product export after new RMS items, suppliers, departments, categories,
+    brands/manufacturers, or aliases have been added.
+    """
+    manifest_path = csv_path + ".manifest.json"
+    if not os.path.exists(manifest_path):
+        if require_manifest:
+            raise RuntimeError(
+                f"Missing RMS export manifest: {manifest_path}. "
+                "Regenerate the product export with the current RMS bridge and copy "
+                "the CSV and its .manifest.json sidecar together."
+            )
+        return {}
+
+    with open(manifest_path, "r", encoding="utf-8-sig") as handle:
+        manifest = json.load(handle)
+
+    generated_raw = str(manifest.get("generated_at_utc") or "").strip()
+    expected_hash = str(manifest.get("csv_sha256") or "").strip().casefold()
+    expected_rows = manifest.get("export_row_count")
+
+    if not generated_raw or not expected_hash or expected_rows is None:
+        raise RuntimeError(
+            "RMS export manifest is missing generated_at_utc, csv_sha256, "
+            "or export_row_count."
+        )
+
+    generated = datetime.fromisoformat(generated_raw.replace("Z", "+00:00"))
+    if generated.tzinfo is None:
+        generated = generated.replace(tzinfo=timezone.utc)
+    age_hours = (datetime.now(timezone.utc) - generated.astimezone(timezone.utc)).total_seconds() / 3600.0
+    if age_hours < -0.25:
+        raise RuntimeError("RMS export manifest timestamp is unexpectedly in the future.")
+    if max_age_hours is not None and age_hours > float(max_age_hours):
+        raise RuntimeError(
+            f"RMS export is {age_hours:.2f} hours old; maximum allowed age is "
+            f"{float(max_age_hours):.2f} hours. Regenerate the RMS product export."
+        )
+
+    digest = hashlib.sha256()
+    with open(csv_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    actual_hash = digest.hexdigest().casefold()
+    if actual_hash != expected_hash:
+        raise RuntimeError(
+            "RMS export CSV hash does not match its manifest. Copy/regenerate the "
+            "CSV and manifest as a matched pair before migration."
+        )
+
+    result = dict(manifest)
+    result["manifest_path"] = manifest_path
+    result["age_hours"] = age_hours
+    return result
+
+
+def build_source_freshness_audit(
+    candidates: pd.DataFrame,
+    category_map: dict,
+    supplier_map: dict,
+    known_brand_values: Optional[Iterable[str]] = None,
+) -> pd.DataFrame:
+    """
+    Surface source dimensions that appeared in the fresh RMS export but are not
+    represented by the current migration mappings/reference data.
+
+    This is intentionally separate from write eligibility. For example v67 may
+    route an unmapped named supplier to Lightspeed 'Other', but this audit still
+    calls out that supplier so a newly-added real vendor cannot pass unnoticed.
+    """
+    rows = []
+    mapped_departments = {dept for dept, _ in category_map.keys() if dept}
+    mapped_category_pairs = set(category_map.keys())
+    mapped_suppliers = set(supplier_map.keys())
+    known_brands = {norm(x) for x in (known_brand_values or []) if norm(x)}
+
+    def values_with_counts(column):
+        if column not in candidates.columns:
+            return []
+        series = candidates[column].fillna("").astype(str).str.strip()
+        counts = series[series.ne("")].value_counts()
+        return [(value, int(count)) for value, count in counts.items()]
+
+    for department, count in values_with_counts("RMS_Department"):
+        key = norm(department)
+        if key not in mapped_departments and key not in INTENTIONAL_EXCLUDED_DEPARTMENTS:
+            rows.append({
+                "Dimension": "Department",
+                "Source Value": department,
+                "Related Value": "",
+                "Product Rows": count,
+                "Status": "NEW_OR_UNMAPPED",
+                "Action": "Review/add an explicit department/category mapping before cutover.",
+            })
+
+    if {"RMS_Department", "RMS_Category"}.issubset(candidates.columns):
+        grouped = (
+            candidates.assign(
+                _dept=candidates["RMS_Department"].fillna("").astype(str).str.strip(),
+                _cat=candidates["RMS_Category"].fillna("").astype(str).str.strip(),
+            )
+            .groupby(["_dept", "_cat"], dropna=False)
+            .size()
+            .sort_values(ascending=False)
+        )
+        for (department, category), count in grouped.items():
+            key = (norm(department), norm(category))
+            if key in mapped_category_pairs or is_intentional_category_exclusion(department, category):
+                continue
+            rows.append({
+                "Dimension": "Department + Category",
+                "Source Value": department,
+                "Related Value": category,
+                "Product Rows": int(count),
+                "Status": "NEW_OR_UNMAPPED",
+                "Action": "Map this RMS classification explicitly or leave its products in REVIEW.",
+            })
+
+    for supplier, count in values_with_counts("RMS_Supplier"):
+        key = norm(supplier)
+        if key not in mapped_suppliers and key != norm("Horizon Hobby Rockets"):
+            rows.append({
+                "Dimension": "Supplier",
+                "Source Value": supplier,
+                "Related Value": "",
+                "Product Rows": count,
+                "Status": "NEW_OR_UNMAPPED",
+                "Action": "Review this supplier even if current fallback would route it to Lightspeed Other.",
+            })
+
+    if known_brands:
+        for brand, count in values_with_counts("Brand"):
+            if norm(brand) not in known_brands:
+                rows.append({
+                    "Dimension": "Manufacturer / Brand",
+                    "Source Value": brand,
+                    "Related Value": "",
+                    "Product Rows": count,
+                    "Status": "NEW_OR_UNMAPPED",
+                    "Action": "Review/canonicalize the new RMS brand before the product write batch.",
+                })
+
+    return pd.DataFrame(
+        rows,
+        columns=["Dimension", "Source Value", "Related Value", "Product Rows", "Status", "Action"],
+    )
 
 
 def find_category_mapping_sheet(worksheets: dict[str, pd.DataFrame]) -> tuple[str, pd.DataFrame]:
