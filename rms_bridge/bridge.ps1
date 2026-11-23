@@ -504,8 +504,51 @@ ORDER BY ChildSchema,ChildTable,ForeignKeyName,fkc.constraint_column_id;
 
     $rows | Export-Csv -Path $ProductExportPath -NoTypeInformation -Encoding UTF8
     $file = Get-Item $ProductExportPath
+
+    # Write a sidecar manifest so the migration notebook can prove that the
+    # CSV came from a recent RMS read instead of silently reusing an old file.
+    # The snapshot counts are read directly from RMS immediately after export.
+    $snapshotRows = @(Invoke-SqlRows @"
+SELECT
+    (SELECT COUNT_BIG(*) FROM Item) AS ItemCount,
+    (SELECT COUNT_BIG(*) FROM Supplier) AS SupplierCount,
+    (SELECT COUNT_BIG(*) FROM Department) AS DepartmentCount,
+    (SELECT COUNT_BIG(*) FROM Category) AS CategoryCount,
+    (SELECT COUNT_BIG(*) FROM Alias) AS AliasCount,
+    (SELECT COUNT_BIG(*) FROM SupplierList) AS SupplierListCount,
+    (SELECT MAX(LastUpdated) FROM Item) AS MaxItemLastUpdated,
+    (SELECT COUNT(DISTINCT NULLIF(LTRIM(RTRIM(SubDescription3)), '')) FROM Item) AS DistinctBrandCount;
+"@)
+    $snapshot = if ($snapshotRows.Count) { $snapshotRows[0] } else { $null }
+    if ($null -eq $snapshot) {
+      throw "Could not read RMS freshness snapshot after product export."
+    }
+
+    $manifestPath = "$ProductExportPath.manifest.json"
+    $manifest = [ordered]@{
+      schema_version = 1
+      generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+      source_database = [string]$config.database
+      csv_file = $file.Name
+      csv_sha256 = (Get-FileHash -Path $ProductExportPath -Algorithm SHA256).Hash.ToLowerInvariant()
+      export_row_count = [int64]$rows.Count
+      rms_snapshot = [ordered]@{
+        item_count = [int64]$snapshot.ItemCount
+        supplier_count = [int64]$snapshot.SupplierCount
+        department_count = [int64]$snapshot.DepartmentCount
+        category_count = [int64]$snapshot.CategoryCount
+        alias_count = [int64]$snapshot.AliasCount
+        supplier_list_count = [int64]$snapshot.SupplierListCount
+        distinct_brand_count = [int64]$snapshot.DistinctBrandCount
+        max_item_last_updated = [string]$snapshot.MaxItemLastUpdated
+      }
+    }
+    $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+
     Write-Host "Product export complete." -ForegroundColor Green
     Write-Host "Path: $($file.FullName)"
+    Write-Host "Manifest: $manifestPath"
+    Write-Host "SHA256: $($manifest.csv_sha256)"
     Write-Host "Size: $([math]::Round($file.Length / 1MB, 2)) MB"
     Write-Host "Brand source: Item.SubDescription3"
     Write-Host "UPC/aliases source: Alias"
